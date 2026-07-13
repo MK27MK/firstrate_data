@@ -8,7 +8,7 @@ from typing import ClassVar, Self
 import requests
 from dotenv import load_dotenv
 
-from query_parameters import Adjustment, AssetType, Period, Timeframe
+from query_parameters import Adjustment, AssetType, MetaFileType, Period, Timeframe
 
 DEFAULT_BASE_URL = "https://firstratedata.com/api"
 
@@ -111,6 +111,60 @@ class FirstRateData:
             archive.extractall(target)
         return target
 
+
+class FirstRateCorporateActions(FirstRateData):
+    """Loader for asset types that have corporate actions.
+
+    The meta_file endpoint advertises every asset type, but its own docs say
+    splits and dividends only exist for stocks and ETFs -- so only those
+    loaders inherit this."""
+
+    # Splits / Dividends Requests --------------------------------------
+
+    def _download_metafile(self, metafile_type: MetaFileType) -> Path:
+        """Fetch a metafile and persist it under ``raw/{asset}/meta/``.
+
+        Splits rows are {date,split-ratio} and dividend rows are
+        {ex-dividend date,dividend amount}, both with dates as yyyy-MM-dd.
+        """
+        params = {
+            "type": self._asset_type.value,
+            "metafile_type": metafile_type.value,
+            "userid": self._userid,
+        }
+        response = requests.get(
+            f"{self._base_url}/meta_file", params=params, timeout=120
+        )
+        response.raise_for_status()
+
+        target = self._raw_directory / self._asset_type.value / "meta"
+        target.mkdir(parents=True, exist_ok=True)
+
+        # ponytail: the docs give the row format but never the container, so
+        # accept either. Drop the zip branch once the live endpoint is pinned.
+        body = io.BytesIO(response.content)
+        if not zipfile.is_zipfile(body):
+            csv_path = target / f"{metafile_type.value}.csv"
+            csv_path.write_bytes(response.content)
+            return csv_path
+
+        target = target / metafile_type.value
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir()
+        with zipfile.ZipFile(body) as archive:
+            archive.extractall(target)
+        return target
+
+    def download_splits(self) -> Path:
+        """Historical splits: {date,split-ratio}, ratio of new to old shares."""
+        return self._download_metafile(MetaFileType.SPLITS)
+
+    def download_dividends(self) -> Path:
+        """Historical dividends: {ex-dividend date,dividend amount}."""
+        return self._download_metafile(MetaFileType.DIVIDENDS)
+
+
 # ----------------------------------------------------------------------
 # test
 # ----------------------------------------------------------------------
@@ -138,10 +192,11 @@ def _demo() -> None:
 
     sent: list[dict[str, str]] = []
     names: list[str] = []
+    raw: list[bytes] = []  # when set, served instead of a zip of `names`
 
     def _fake_get(url: str, params: dict[str, str], timeout: int) -> _FakeResponse:
         sent.append(params)
-        return _FakeResponse(_make_zip(names))
+        return _FakeResponse(raw[0] if raw else _make_zip(names))
 
     orig_get = requests.get
     requests.get = _fake_get  # type: ignore[assignment]
@@ -196,6 +251,25 @@ def _demo() -> None:
                 Period.DAY, Timeframe.MIN_1, Adjustment.SPLIT
             )
             assert out3 == Path(tmp) / "raw/stock/day/1min/adj_split", out3
+
+            # metafile, plain-csv body -> a file under meta/
+            raw[:] = [b"2020-08-31,4\n"]
+            splits = loader.download_splits()
+            assert splits == Path(tmp) / "raw/stock/meta/splits.csv", splits
+            assert splits.read_bytes() == raw[0]
+            assert sent[-1]["metafile_type"] == "splits"
+            assert sent[-1]["type"] == "stock"
+
+            # rerun overwrites rather than appends
+            raw[:] = [b"2020-08-31,4\n2014-06-09,7\n"]
+            assert loader.download_splits().read_bytes() == raw[0]
+
+            # metafile, zipped body -> a folder under meta/
+            raw[:] = [_make_zip(["dividends.txt"])]
+            dividends = loader.download_dividends()
+            assert dividends == Path(tmp) / "raw/stock/meta/dividends", dividends
+            assert (dividends / "dividends.txt").exists()
+            assert sent[-1]["metafile_type"] == "dividends"
     finally:
         requests.get = orig_get  # type: ignore[assignment]
     print("ok")

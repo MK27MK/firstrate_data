@@ -22,6 +22,11 @@ class Timeframe(StrEnum):
     DAY_1 = "1day"
 
 
+class MetaFileType(StrEnum):
+    SPLITS = auto()
+    DIVIDENDS = auto()
+
+
 class Adjustment(StrEnum):
     SPLIT = "adj_split"
     SPLIT_DIVIDEND = "adj_splitdiv"
