@@ -70,7 +70,6 @@ class FirstRateData:
 
             This parameter can only be used when requesting the full historical archive (ie 'period=full')
         """
-        # TODO CLAUDE are we sure ticker_range is required when period = full? the docs seem to say that you can use it only if period = full, not that you HAVE TO.
         if period is Period.FULL and ticker_range is None:
             raise ValueError("ticker_range (A-Z) is required when period=full")
         if ticker_range is not None:
@@ -120,6 +119,8 @@ class FirstRateData:
 def _demo() -> None:
     """Self-check: no network. Feed a fake zip through the extract/persist path."""
     import tempfile
+
+    from stock import FirstRateStocks  # local: stock.py imports this module
 
     class _FakeResponse:
         def __init__(self, content: bytes):
