@@ -90,7 +90,9 @@ class FirstRateData:
         if ticker_range is not None:
             params["ticker_range"] = ticker_range
 
-        response = requests.get(f"{self._base_url}/data_file", params=params, timeout=120)
+        response = requests.get(
+            f"{self._base_url}/data_file", params=params, timeout=120
+        )
         response.raise_for_status()
 
         target = (
@@ -110,18 +112,9 @@ class FirstRateData:
             archive.extractall(target)
         return target
 
-    # Splits / Dividends Requests --------------------------------------
-    # (out of scope for now; live on subclasses that actually have them)
-
-
-class FirstRateStocks(FirstRateData):
-    """Loader for FirstRate stock data."""
-
-    _asset_type = AssetType.STOCK
-
-    def download_splits(self) -> Path: ...
-
-    def download_dividends(self) -> Path: ...
+# ----------------------------------------------------------------------
+# test
+# ----------------------------------------------------------------------
 
 
 def _demo() -> None:
@@ -157,8 +150,12 @@ def _demo() -> None:
 
             # period=full requires ticker_range
             try:
-                loader.download_historical_data(Period.FULL, Timeframe.MIN_1, Adjustment.SPLIT)
-                raise AssertionError("expected ValueError for full without ticker_range")
+                loader.download_historical_data(
+                    Period.FULL, Timeframe.MIN_1, Adjustment.SPLIT
+                )
+                raise AssertionError(
+                    "expected ValueError for full without ticker_range"
+                )
             except ValueError:
                 pass
 
@@ -167,7 +164,9 @@ def _demo() -> None:
                 loader.download_historical_data(
                     Period.DAY, Timeframe.MIN_1, Adjustment.SPLIT, ticker_range="A"
                 )
-                raise AssertionError("expected ValueError for ticker_range without full")
+                raise AssertionError(
+                    "expected ValueError for ticker_range without full"
+                )
             except ValueError:
                 pass
 
@@ -192,7 +191,9 @@ def _demo() -> None:
 
             # non-full: no ticker_range segment
             names[:] = ["AAPL.txt"]
-            out3 = loader.download_historical_data(Period.DAY, Timeframe.MIN_1, Adjustment.SPLIT)
+            out3 = loader.download_historical_data(
+                Period.DAY, Timeframe.MIN_1, Adjustment.SPLIT
+            )
             assert out3 == Path(tmp) / "raw/stock/day/1min/adj_split", out3
     finally:
         requests.get = orig_get  # type: ignore[assignment]
