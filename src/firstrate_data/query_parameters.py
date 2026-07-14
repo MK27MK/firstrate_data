@@ -46,3 +46,26 @@ class ContinuousFuturesAdjustment(StrEnum):
 class ContractFiles(StrEnum):
     ARCHIVE = auto()  # pre-2026
     UPDATE = auto()  # 2026+, refreshed daily
+
+
+class DelistedArchive(StrEnum):
+    """One slice of the pre-2026 delisted history, downloaded on its own.
+
+    The docs list the accepted values as 1-5 but call them "the four historical
+    archives" in the same breath. We follow the values: a fifth archive that does
+    not exist fails loudly on the first request, whereas omitting one that does
+    exist would silently cost us a fifth of the delisted history.
+    """
+
+    ARCHIVE_1 = "1"
+    ARCHIVE_2 = "2"
+    ARCHIVE_3 = "3"
+    ARCHIVE_4 = "4"
+    ARCHIVE_5 = "5"
+
+
+class DelistedUpdate(StrEnum):
+    """The 2026+ delisted data, refreshed at the end of each week (Sunday 11pm EST)."""
+
+    WEEK = auto()
+    YEAR = auto()

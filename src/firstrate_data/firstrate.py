@@ -30,15 +30,26 @@ class FirstRateData[AdjustmentT: StrEnum](ABC):
 
     _asset_type: ClassVar[AssetType]
 
-    def __init__(self, directory: Path, userid: str, base_url: str = DEFAULT_BASE_URL):
+    def __init__(
+        self,
+        directory: Path,
+        userid: str,
+        base_url: str = DEFAULT_BASE_URL,
+        skip_existing: bool = False,
+    ):
         self._directory = directory
         # where the unzipped .txt data in csv is kept
         self._raw_directory = directory / "raw"
         self._userid = userid
         self._base_url = base_url.rstrip("/")
+        # trades freshness for time: an already-populated request folder is left
+        # untouched rather than re-fetched. Only sound for archives that never
+        # change (delisted pre-2026) or when resuming an interrupted sweep --
+        # a listed 'full' archive is rebuilt daily, so a kept folder goes stale.
+        self._skip_existing = skip_existing
 
     @classmethod
-    def from_data_path(cls) -> Self:
+    def from_data_path(cls, skip_existing: bool = False) -> Self:
         load_dotenv()
         data_path = os.getenv("DATA_PATH")
         if data_path is None:
@@ -47,7 +58,12 @@ class FirstRateData[AdjustmentT: StrEnum](ABC):
         if userid is None:
             raise KeyError("FIRSTRATE_USERID not found.")
         base_url = os.getenv("FIRSTRATE_BASE_URL", DEFAULT_BASE_URL)
-        return cls(Path(data_path), userid=userid, base_url=base_url)
+        return cls(
+            Path(data_path),
+            userid=userid,
+            base_url=base_url,
+            skip_existing=skip_existing,
+        )
 
     # Transport / persistence ------------------------------------------
 
@@ -72,6 +88,8 @@ class FirstRateData[AdjustmentT: StrEnum](ABC):
     def _fetch_archive(
         self, endpoint: str, params: dict[str, str], target: Path
     ) -> Path:
+        if self._skip_existing and any(target.glob("*")):
+            return target
         return self._extract_zip(self._get(endpoint, params), target)
 
     # Historical Data Requests -----------------------------------------
@@ -178,12 +196,21 @@ class FirstRateEquities(FirstRateData[EquitiesAdjustment]):
             Specifies the period the timeframe of the data. '1min' will request 1-minute intraday bars, '5min' requests 5-minute bars etc.
             Note : bars with zero volumes are not included
         adjustment : EquitiesAdjustment
-            Specifies the price adjustment applied to the data. 'adj_split' adjusts for splits only, 'adj_splitdiv' adjusts for both splits and dividends, 'UNADJUSTED' returns raw prices.
+            Specifies the type of adjustment. 'adj_split' is data adjusted for splits only, 'adj_splitdiv' is data adjusted for both splits and dividends, 'UNADJUSTED' is raw data without any splits or dividend adjustments. UNADJUSTED data is only available in the 1min and 1day timeframes.
         ticker_range : str | None
             Only to be used when requesting the full historical dataset (ie 'period=full'). This parameter specifies the first letter of the ticker, for example 'ticker_range=C' will request all tickers beginning with the letter C
 
             This parameter can only be used when requesting the full historical archive (ie 'period=full')
         """
+        # the delisted endpoint allows UNADJUSTED on 1min *only* -- same enum,
+        # narrower rule, so each endpoint guards its own
+        if adjustment is EquitiesAdjustment.UNADJUSTED and timeframe not in (
+            Timeframe.MIN_1,
+            Timeframe.DAY_1,
+        ):
+            raise ValueError(
+                "UNADJUSTED data is only available in the 1min and 1day timeframes"
+            )
         if period is Period.FULL and ticker_range is None:
             raise ValueError("ticker_range (A-Z) is required when period=full")
         if ticker_range is not None:

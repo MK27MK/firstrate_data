@@ -47,6 +47,30 @@ Bar granularity: `1min`, `5min`, `30min`, `1hour`, `1day`. Bars with zero
 volume are omitted by the source. Futures `1day` bars carry a seventh column,
 **open interest**; intraday futures bars do not.
 
+## Delisted ticker data
+
+Data for tickers that no longer trade. **Stocks only.** It is a separate dataset from
+the listed one, not a filter over it: it has no *period* and no *ticker range*, and is
+partitioned instead by a **delisted selector**. Without it the listed archive is a
+survivorship-biased view of the market.
+
+## Delisted selector
+
+Which slice of the delisted dataset is being asked for — always exactly one of:
+
+- **Delisted archive** — a numbered slice of the pre-2026 history, downloaded on its
+  own. Frozen: the past does not gain new delistings.
+- **Delisted update** — the 2026-onward delistings, as either the whole `year` or just
+  the last `week`. Refreshed at the end of each week (Sunday). `week` is contained in
+  `year`.
+
+## Complete bundle
+
+Everything there is to know about the stock universe at a given timeframe and
+adjustment: the full listed archive across every ticker range, the entire delisted
+history, and the splits and dividends that explain the price adjustments in both. A
+complete pull takes `year` and not `week`, since the latter is already inside it.
+
 ## Adjustment
 
 Price adjustment applied to the data. Required by `data_file`, and the accepted
@@ -57,6 +81,10 @@ and vice versa:
   corporate actions.
 - **Futures**: `contin_adj_ratio`, `contin_adj_absolute`, `contin_UNadj` — corrects
   for roll dates (below).
+
+`UNADJUSTED` is not offered at every timeframe, and the offer differs by request:
+listed data has it at `1min` and `1day`, delisted data at `1min` only. So an
+adjustment is not meaningful on its own — only paired with a timeframe.
 
 ## Continuous series
 
