@@ -48,6 +48,7 @@ class BundleReport:
 
 
 def download_stocks_complete(
+    period: Period,
     timeframes: list[Timeframe],
     adjustments: list[EquitiesAdjustment],
     ticker_ranges: list[str] | None = None,
@@ -91,7 +92,7 @@ def download_stocks_complete(
                     f"listed {timeframe}/{adjustment}/{ticker_range}",
                     partial(
                         stocks.download_historical_data,
-                        period=Period.FULL,
+                        period=period,
                         timeframe=timeframe,
                         adjustment=adjustment,
                         ticker_range=ticker_range,

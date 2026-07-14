@@ -77,12 +77,20 @@ class FirstRateData[AdjustmentT: StrEnum](ABC):
         return response.content
 
     def _extract_zip(self, content: bytes, target: Path) -> Path:
-        # clean-and-replace: the folder always reflects exactly one archive
+        # unzip into a sibling and swap it in, so `target` either holds one whole
+        # archive or does not exist. Extracting in place would let a Ctrl-C land
+        # mid-unzip and leave a populated-but-partial folder, which skip_existing
+        # would then read as finished and never re-fetch.
+        staging = target.with_name(f"{target.name}.partial")
+        if staging.exists():
+            shutil.rmtree(staging)
+        staging.mkdir(parents=True)
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            archive.extractall(staging)
+
         if target.exists():
             shutil.rmtree(target)
-        target.mkdir(parents=True)
-        with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            archive.extractall(target)
+        staging.replace(target)
         return target
 
     def _fetch_archive(
