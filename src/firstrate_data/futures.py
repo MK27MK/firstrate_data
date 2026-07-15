@@ -20,7 +20,7 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
 
     _asset_type = AssetType.FUTURES
 
-    def download_historical_data(
+    def download_historical_bars(
         self,
         period: Period,
         timeframe: Timeframe,
@@ -50,7 +50,7 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
             'contin_adj_ratio' is the ratio-adjusted data to avoid artifical price jumps on roll dates.
             'contin_adj_absolute' is the absolute-adjusted data to avoid artifical price jumps on roll dates.
         """
-        return self._historical_data_query(period, timeframe, adjustment)
+        return self._fetch_and_persist_historical_bars(period, timeframe, adjustment)
 
     def download_contracts(
         self, contract_files: ContractFiles, timeframe: Timeframe
@@ -78,15 +78,14 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
             "contract_files": contract_files.value,
             "timeframe": timeframe.value,
         }
-        target = (
-            self._raw_directory
-            / self._asset_type.value
-            / "contracts"
-            / contract_files.value
-            / timeframe.value
+        target = self._catalog.get_raw_path(
+            self._asset_type.value,
+            "contracts",
+            contract_files.value,
+            timeframe.value,
         )
-        return self._fetch_archive("futures_contract", params, target)
+        return self._fetch_zip_archive("futures_contract", params, target)
 
     def download_continuous_audit(self) -> Path:
         """This function returns the individual futures contracts used in constructing the continuous data series."""
-        return self._download_metafile(MetaFileType.CONTIN_AUDIT)
+        return self._fetch_and_persist_metafile(MetaFileType.CONTIN_AUDIT)
