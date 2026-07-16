@@ -35,6 +35,14 @@ The API is **not uniform** across asset types: the same endpoint takes different
 parameters depending on the type. This is why the loaders diverge rather than
 sharing one signature. See ADR 0002.
 
+## Dataset
+
+Which body of data within an asset type a bar belongs to, once it is at rest:
+`listed` or `delisted` for stocks, `continuous` for futures, `contract` for the
+individual contracts. Each is fetched on its own terms — a different endpoint, or
+different parameters — but they describe one universe, so a question asked of the
+whole universe should not have to name them one by one. See ADR 0005.
+
 ## Equities
 
 Stocks and ETFs, taken together. They are one family because they share three
@@ -50,6 +58,13 @@ format. The unzipped `.txt` payloads are the actual bars.
 
 Span of the request: `full` (entire archive), `month` (last 30 days), `week`
 (current trading week from Monday), `day` (last trading day).
+
+## Vintage
+
+The moment a slice was fetched. Two pulls of the same **period** at different times
+are the same *request* and different data, so the vintage is what tells them apart.
+It matters because the vendor's answer to an unchanged question changes over time —
+history grows at one end, and **adjusted** history is rewritten at the other.
 
 ## Ticker range
 
@@ -69,6 +84,12 @@ Data for tickers that no longer trade. **Stocks only.** It is a separate dataset
 the listed one, not a filter over it: it has no *period* and no *ticker range*, and is
 partitioned instead by a **delisted selector**. Without it the listed archive is a
 survivorship-biased view of the market.
+
+Separate is how it is *fetched*, not how it is *known*. At rest it is one **dataset**
+among others of the same asset type, and the market is the union — so the plain
+question is the unbiased one and the bias is what you have to ask for. The distinction
+still has to survive: a ticker can be reused by a later company, and a dead namesake
+must not be mistaken for its own early history.
 
 ## Delisted selector
 
@@ -101,6 +122,16 @@ and vice versa:
 `UNADJUSTED` is not offered at every timeframe, and the offer differs by request:
 listed data has it at `1min` and `1day`, delisted data at `1min` only. So an
 adjustment is not meaningful on its own — only paired with a timeframe.
+
+## Adjustment basis
+
+The corporate actions a given **adjusted** series already accounts for — in effect,
+the date it was computed as of. Every new split or dividend rewrites all the history
+before it, so the same bar of the same ticker at the same timestamp has different
+adjusted prices depending on when it was fetched. Two series on different bases are
+not comparable and must not be joined end-to-end: the seam would read as a price move
+that never happened. Unadjusted prices have no basis — nothing restates them — which
+is why they are the only ones that can simply be extended. See ADR 0005.
 
 ## Continuous series
 
