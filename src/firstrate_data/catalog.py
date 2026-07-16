@@ -18,12 +18,10 @@ from firstrate_data.query_parameters import (
 
 
 class Catalog:
-
     def __init__(self, directory: Path):
         self._directory = directory
         # where the unzipped .txt data in csv is kept
         self._raw_directory = directory / "raw"
-        self._processed_directory = directory / "processed"
 
     @classmethod
     def from_env(cls) -> Self:
@@ -33,25 +31,30 @@ class Catalog:
             raise FileNotFoundError("DATA_PATH not found.")
         return cls(Path(data_path))
 
+    def get_raw_path(self, *segments: str) -> Path:
+        """Build a path under the raw store from ordered segments.
+
+        The single seam every path helper below goes through, so callers never
+        touch ``_raw_directory`` and asset-specific sub-trees (contracts,
+        delisted) can be keyed without a bespoke method each.
+        """
+        return self._raw_directory.joinpath(*segments)
+
     def get_bars_path(
         self,
         asset_type: AssetType,
         period: Period,
         timeframe: Timeframe,
         adjustment: EquitiesAdjustment | ContinuousFuturesAdjustment,
-    ):
-        return (
-            self._raw_directory
-            / asset_type
-            / period.value
-            / timeframe.value
-            / adjustment.value
+    ) -> Path:
+        return self.get_raw_path(
+            asset_type.value, period.value, timeframe.value, adjustment.value
         )
 
     def get_metadata_path(
         self, asset_type: AssetType, metafile_type: MetaDataType
     ) -> Path:
-        return self._raw_directory / asset_type.value / "meta" / metafile_type.value
+        return self.get_raw_path(asset_type.value, "meta", metafile_type.value)
 
     # ------------------------------------------------------------------
     # writing methods
@@ -66,27 +69,11 @@ class Catalog:
         adjustment: EquitiesAdjustment | ContinuousFuturesAdjustment,
         ticker_range: str | None = None,
     ) -> Path:
-        """Unzips `content` and writes the bars to the right path.
+        """Unzip a bars archive into its request-scoped folder and return it.
 
-        Parameters
-        ----------
-        content : bytes
-            _description_
-        asset_type : AssetType
-            _description_
-        period : Period
-            _description_
-        timeframe : Timeframe
-            _description_
-        adjustment : EquitiesAdjustment | ContinuousFuturesAdjustment
-            _description_
-        ticker_range : str | None, optional
-            _description_, by default None
-
-        Returns
-        -------
-        Path
-            _description_
+        The folder is keyed by every request parameter (``ticker_range`` too,
+        when the asset type uses it), so distinct requests never share a path and
+        one range's archive cannot clobber another's.
         """
 
         target = self.get_bars_path(asset_type, period, timeframe, adjustment)
@@ -116,6 +103,16 @@ class Catalog:
 
         return target
 
+    def write_raw_archive(self, zip_file: bytes, target: Path) -> Path:
+        """Unzip an archive into an arbitrary raw sub-path and return it.
+
+        For asset-specific zip endpoints (futures contracts, delisted stocks)
+        whose folder layout has no dedicated ``get_*_path``; the caller builds
+        ``target`` via :meth:`get_raw_path`.
+        """
+        self._unzip_and_write(zip_file, target)
+        return target
+
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
@@ -124,8 +121,8 @@ class Catalog:
 
         # unzip into a sibling and swap it in, so `target` either holds one whole
         # archive or does not exist. Extracting in place would let a Ctrl-C land
-        # mid-unzip and leave a populated-but-partial folder, which skip_existing
-        # would then read as finished and never re-fetch.
+        # mid-unzip and leave a populated-but-partial folder that a later resume
+        # would read as finished and never re-fetch.
         staging = target.with_name(f"{target.name}.partial")
         if staging.exists():
             shutil.rmtree(staging)

@@ -52,7 +52,6 @@ def download_stocks_complete(
     timeframes: list[Timeframe],
     adjustments: list[EquitiesAdjustment],
     ticker_ranges: list[str] | None = None,
-    skip_existing: bool = False,
 ) -> BundleReport:
     """Download the complete stocks bundle: the full listed history, the delisted
     history, and the corporate actions behind both.
@@ -75,12 +74,8 @@ def download_stocks_complete(
     ticker_ranges : list[str] | None
         Which first letters of the ticker to pull the listed archive for. Defaults
         to the whole alphabet, which is what makes the bundle complete.
-    skip_existing : bool
-        Leave already-populated request folders alone instead of re-fetching them.
-        Off by default, so a bundle is always freshly built; turn it on to resume an
-        interrupted sweep, accepting that anything already on disk stays as it is.
     """
-    stocks = FirstRateStocks.from_data_path(skip_existing=skip_existing)
+    stocks = FirstRateStocks.from_env()
     ranges = list(ascii_uppercase) if ticker_ranges is None else ticker_ranges
     report = BundleReport()
 
@@ -91,7 +86,7 @@ def download_stocks_complete(
                 report._record(
                     f"listed {timeframe}/{adjustment}/{ticker_range}",
                     partial(
-                        stocks.download_historical_data,
+                        stocks.download_historical_bars,
                         period=period,
                         timeframe=timeframe,
                         adjustment=adjustment,
