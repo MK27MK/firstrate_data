@@ -9,6 +9,7 @@ from firstrate_data.query_parameters import (
     Period,
     Timeframe,
 )
+from firstrate_data.request import BarsRequest, ContractsRequest, MetafileRequest
 
 
 class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
@@ -50,7 +51,9 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
             'contin_adj_ratio' is the ratio-adjusted data to avoid artifical price jumps on roll dates.
             'contin_adj_absolute' is the absolute-adjusted data to avoid artifical price jumps on roll dates.
         """
-        return self._fetch_and_persist_historical_bars(period, timeframe, adjustment)
+        return self._fetch_and_persist_historical_bars(
+            BarsRequest(self._asset_type, period, timeframe, adjustment)
+        )
 
     def download_contracts(
         self, contract_files: ContractFiles, timeframe: Timeframe
@@ -74,25 +77,13 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
             Note : 1day data also includes open-interest in the final file. (therefore the data format for 1day futures data is {DateTime, Open, High, Low, Close, Volume,Open Interest})
         """
 
-        return self._fetch_and_persist_contracts(contract_files, timeframe)
+        request = ContractsRequest(contract_files, timeframe)
+        zip_file = self._get(request)
+
+        return self._catalog.write_raw_contracts(zip_file, request)
 
     def download_continuous_audit(self) -> Path:
         """This function returns the individual futures contracts used in constructing the continuous data series."""
-        return self._fetch_and_persist_metafile(MetaDataType.CONTIN_AUDIT)
-
-    # ------------------------------------------------------------------
-    # helpers
-    # ------------------------------------------------------------------
-
-    def _fetch_and_persist_contracts(
-        self, contract_files: ContractFiles, timeframe: Timeframe
-    ) -> Path:
-
-        # this endpoint takes no `type` param -- it is futures-only by definition
-        params = {
-            "contract_files": contract_files.value,
-            "timeframe": timeframe.value,
-        }
-        zip_file = self._get("meta_file", params)
-
-        return self._catalog.write_raw_contracts(zip_file, contract_files, timeframe)
+        return self._fetch_and_persist_metafile(
+            MetafileRequest(self._asset_type, MetaDataType.CONTIN_AUDIT)
+        )

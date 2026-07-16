@@ -10,17 +10,25 @@ from dotenv import load_dotenv
 from firstrate_data.query_parameters import (
     AssetType,
     ContinuousFuturesAdjustment,
-    ContractFiles,
-    DelistedArchive,
-    DelistedUpdate,
     EquitiesAdjustment,
-    MetaDataType,
-    Period,
-    Timeframe,
+)
+from firstrate_data.request import (
+    BarsRequest,
+    ContractsRequest,
+    DelistedRequest,
+    MetafileRequest,
 )
 
 
 class Catalog:
+    """The on-disk store: where a request's archive lands, and how.
+
+    Domain-aware on purpose -- it takes request objects and derives their layout
+    rather than being handed a path -- so that the mapping from request to
+    location is stated once, here, and a read side can later be added against the
+    same keys. See ADR 0004.
+    """
+
     def __init__(self, directory: Path):
         self._directory = directory
         # where the unzipped .txt data in csv is kept
@@ -45,50 +53,47 @@ class Catalog:
 
     def get_bars_path(
         self,
-        asset_type: AssetType,
-        period: Period,
-        timeframe: Timeframe,
-        adjustment: EquitiesAdjustment | ContinuousFuturesAdjustment,
+        request: BarsRequest[EquitiesAdjustment | ContinuousFuturesAdjustment],
     ) -> Path:
+        """Where one bars request's archive lives, keyed by every field it has.
+
+        ``ticker_range`` included: a key derived from a subset of the request is
+        a key two distinct requests can share, and the one that arrives second
+        overwrites the first.
+        """
+        segments = [
+            request.asset_type.value,
+            request.period.value,
+            request.timeframe.value,
+            request.adjustment.value,
+        ]
+
+        if request.ticker_range is not None:
+            segments.append(request.ticker_range)
+
+        return self.get_raw_path(*segments)
+
+    def get_metadata_path(self, request: MetafileRequest) -> Path:
         return self.get_raw_path(
-            asset_type.value, period.value, timeframe.value, adjustment.value
+            request.asset_type.value, "meta", request.metadata_type.value
         )
 
-    def get_metadata_path(
-        self, asset_type: AssetType, metafile_type: MetaDataType
-    ) -> Path:
-        return self.get_raw_path(asset_type.value, "meta", metafile_type.value)
-
-    def get_delisted_archive_path(
-        self,
-        selector: DelistedArchive | DelistedUpdate,
-        timeframe: Timeframe,
-        adjustment: EquitiesAdjustment,
-    ) -> Path:
-
-        is_archive = isinstance(selector, DelistedArchive)
-        kind = "archive" if is_archive else "update"
-
+    def get_delisted_path(self, request: DelistedRequest) -> Path:
         return self.get_raw_path(
             AssetType.STOCK,
             "delisted",
-            kind,
-            selector.value,
-            timeframe.value,
-            adjustment.value,
+            request.kind,
+            request.selector.value,
+            request.timeframe.value,
+            request.adjustment.value,
         )
 
-    def get_contracts_path(
-        self,
-        contract_files: ContractFiles,
-        timeframe: Timeframe,
-    ) -> Path:
-
+    def get_contracts_path(self, request: ContractsRequest) -> Path:
         return self.get_raw_path(
             AssetType.FUTURES,
             "contracts",
-            contract_files.value,
-            timeframe.value,
+            request.contract_files.value,
+            request.timeframe.value,
         )
 
     # ------------------------------------------------------------------
@@ -98,39 +103,22 @@ class Catalog:
     def write_raw_bars(
         self,
         zip_file: bytes,
-        asset_type: AssetType,
-        period: Period,
-        timeframe: Timeframe,
-        adjustment: EquitiesAdjustment | ContinuousFuturesAdjustment,
-        ticker_range: str | None = None,
+        request: BarsRequest[EquitiesAdjustment | ContinuousFuturesAdjustment],
     ) -> Path:
-        """Unzip a bars archive into its request-scoped folder and return it.
-
-        The folder is keyed by every request parameter (``ticker_range`` too,
-        when the asset type uses it), so distinct requests never share a path and
-        one range's archive cannot clobber another's.
-        """
-
-        target = self.get_bars_path(asset_type, period, timeframe, adjustment)
-
-        if ticker_range is not None:
-            target = target / ticker_range
-
+        target = self.get_bars_path(request)
         self._unzip_and_write(zip_file, target)
 
         return target
 
-    def write_raw_metadata(
-        self, content: bytes, asset_type: AssetType, metadata_type: MetaDataType
-    ) -> Path:
+    def write_raw_metadata(self, content: bytes, request: MetafileRequest) -> Path:
 
-        target = self.get_metadata_path(asset_type, metadata_type)
+        target = self.get_metadata_path(request)
         target.mkdir(parents=True, exist_ok=True)
 
         # the docs give the row format but never the container, so
         # accept either. Drop the zip branch once the live endpoint is pinned.
         if not zipfile.is_zipfile(io.BytesIO(content)):
-            csv_path = target / f"{metadata_type.value}.csv"
+            csv_path = target / f"{request.metadata_type.value}.csv"
             csv_path.write_bytes(content)
             return csv_path
 
@@ -138,35 +126,14 @@ class Catalog:
 
         return target
 
-    def write_raw_archive(
-        self,
-        zip_file: bytes,
-        selector: DelistedArchive | DelistedUpdate,
-        timeframe: Timeframe,
-        adjustment: EquitiesAdjustment,
-    ) -> Path:
-        """Unzip an archive into an arbitrary raw sub-path and return it.
-
-        For asset-specific zip endpoints (futures contracts, delisted stocks)
-        whose folder layout has no dedicated ``get_*_path``; the caller builds
-        ``target`` via :meth:`get_raw_path`.
-        """
-
-        target = self.get_delisted_archive_path(selector, timeframe, adjustment)
-        target.mkdir(parents=True, exist_ok=True)
-
+    def write_raw_delisted(self, zip_file: bytes, request: DelistedRequest) -> Path:
+        target = self.get_delisted_path(request)
         self._unzip_and_write(zip_file, target)
+
         return target
 
-    def write_raw_contracts(
-        self,
-        zip_file: bytes,
-        contract_files: ContractFiles,
-        timeframe: Timeframe,
-    ) -> Path:
-
-        target = self.get_contracts_path(contract_files, timeframe)
-
+    def write_raw_contracts(self, zip_file: bytes, request: ContractsRequest) -> Path:
+        target = self.get_contracts_path(request)
         self._unzip_and_write(zip_file, target)
 
         return target

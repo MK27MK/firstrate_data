@@ -4,10 +4,26 @@ Glossary for the FirstRate Data local loader. Terms only, no implementation.
 
 ## FirstRateData
 
-The base loader. Owns a managed on-disk `_directory` and the shared machinery to
-fetch, unzip, and persist FirstRate Data archives into it coherently. Named for
-the dataset/vendor; "loading" is what its methods do, not its identity. Not used
-directly — one subclass per asset type fixes `_asset_type`.
+The base loader. Owns the credentials and the fetching: it asks FirstRate Data for
+an archive and hands it to the **catalog** to keep. Named for the dataset/vendor;
+"loading" is what its methods do, not its identity. Not used directly — one
+subclass per asset type fixes the asset type.
+
+## Catalog
+
+The local store, and the only thing that knows its layout. Every **request** maps
+to exactly one location, derived from every parameter of that request, so two
+different requests never resolve to the same place and no archive can overwrite
+another's. A store is written now and read back later, so the catalog is where
+that mapping is stated once rather than at each call site. See ADR 0004.
+
+## Request
+
+One call to one endpoint: the parameters that identify a slice of the dataset,
+together with the endpoint they are meaningful for. The two are inseparable — the
+same `timeframe` and `adjustment` mean one thing at the listed endpoint and another
+at the delisted one — which is why a request is a single thing and not a loose bag
+of arguments. Internal: callers of `download_*` never build one.
 
 ## Asset type
 

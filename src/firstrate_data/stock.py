@@ -10,6 +10,7 @@ from firstrate_data.query_parameters import (
     Period,
     Timeframe,
 )
+from firstrate_data.request import BarsRequest, DelistedRequest, MetafileRequest
 
 
 class FirstRateEquities(FirstRateData[EquitiesAdjustment]):
@@ -65,18 +66,22 @@ class FirstRateEquities(FirstRateData[EquitiesAdjustment]):
                 raise ValueError("ticker_range must be a single letter A-Z")
 
         return self._fetch_and_persist_historical_bars(
-            period, timeframe, adjustment, ticker_range
+            BarsRequest(self._asset_type, period, timeframe, adjustment, ticker_range)
         )
 
     # Splits / Dividends Requests --------------------------------------
 
     def download_splits(self) -> Path:
         """Historical splits: {date,split-ratio}, ratio of new to old shares."""
-        return self._fetch_and_persist_metafile(MetaDataType.SPLITS)
+        return self._fetch_and_persist_metafile(
+            MetafileRequest(self._asset_type, MetaDataType.SPLITS)
+        )
 
     def download_dividends(self) -> Path:
         """Historical dividends: {ex-dividend date,dividend amount}."""
-        return self._fetch_and_persist_metafile(MetaDataType.DIVIDENDS)
+        return self._fetch_and_persist_metafile(
+            MetafileRequest(self._asset_type, MetaDataType.DIVIDENDS)
+        )
 
 
 class FirstRateStocks(FirstRateEquities):
@@ -131,37 +136,7 @@ class FirstRateStocks(FirstRateEquities):
                 "UNADJUSTED delisted data is only available in the 1min timeframe"
             )
 
-        return self._fetch_and_persist_delisted_bars(
-            selector,
-            timeframe,
-            adjustment,
-        )
+        request = DelistedRequest(selector, timeframe, adjustment)
+        zip_file = self._get(request)
 
-    # ------------------------------------------------------------------
-    # Comment
-    # ------------------------------------------------------------------
-
-    def _fetch_and_persist_delisted_bars(
-        self,
-        selector: DelistedArchive | DelistedUpdate,
-        timeframe: Timeframe,
-        adjustment: EquitiesAdjustment,
-    ) -> Path:
-
-        is_archive = isinstance(selector, DelistedArchive)
-        # this endpoint takes no `type` param -- it is stock-only by definition
-        params = {
-            "archive_number" if is_archive else "update": selector.value,
-            "timeframe": timeframe.value,
-            "adjustment": adjustment.value,
-        }
-
-        zip_file = self._get("data_file", params)
-
-        return self._catalog.write_raw_archive(
-            zip_file,
-            self._asset_type,
-            selector,
-            timeframe,
-            adjustment,
-        )
+        return self._catalog.write_raw_delisted(zip_file, request)

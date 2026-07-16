@@ -11,10 +11,10 @@ from firstrate_data.query_parameters import (
     AssetType,
     ContinuousFuturesAdjustment,
     EquitiesAdjustment,
-    MetaDataType,
     Period,
     Timeframe,
 )
+from firstrate_data.request import BarsRequest, MetafileRequest, Request
 
 DEFAULT_BASE_URL = "https://firstratedata.com/api"
 
@@ -74,59 +74,36 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
 
     # Transport / persistence ------------------------------------------
 
-    def _get(self, endpoint: str, params: dict[str, str]) -> bytes:
+    def _get(self, request: Request) -> bytes:
         response = requests.get(
-            f"{self._base_url}/{endpoint}",
-            params={**params, "userid": self._user_id},
+            f"{self._base_url}/{request.endpoint}",
+            params={**request.to_params(), "userid": self._user_id},
             timeout=120,
         )
         response.raise_for_status()
         return response.content
 
     def _fetch_and_persist_historical_bars(
-        self,
-        period: Period,
-        timeframe: Timeframe,
-        adjustment: AdjustmentT,
-        ticker_range: str | None = None,
+        self, request: BarsRequest[AdjustmentT]
     ) -> Path:
-        # ticker_range is a stock/ETF concept -- the rules for it belong to the
-        # subclass that has it, not here. This only wires it through.
-        params = {
-            "type": self._asset_type.value,
-            "period": period.value,
-            "timeframe": timeframe.value,
-            "adjustment": adjustment.value,
-        }
+        """Fetch a bars archive and persist it. Shared by every asset type.
 
-        if ticker_range is not None:
-            params["ticker_range"] = ticker_range
+        ``BarsRequest[AdjustmentT]`` rather than ``BarsRequest`` keeps ADR 0002's
+        invariant one layer deeper: a futures loader cannot hand this an
+        equities-adjusted request.
+        """
+        zip_file = self._get(request)
 
-        zip_file = self._get("data_file", params)
-
-        return self._catalog.write_raw_bars(
-            zip_file,
-            self._asset_type,
-            period,
-            timeframe,
-            adjustment,
-            ticker_range,
-        )
+        return self._catalog.write_raw_bars(zip_file, request)
 
     # Meta File Requests -----------------------------------------------
 
-    def _fetch_and_persist_metafile(self, metadata_type: MetaDataType) -> Path:
+    def _fetch_and_persist_metafile(self, request: MetafileRequest) -> Path:
         """Fetch a metafile and persist it under ``raw/{asset}/meta/``.
 
         Lives on the base rather than on the equities loader because ``meta_file``
         also serves the futures continuous-series audit file.
         """
-        params = {
-            "type": self._asset_type.value,
-            "metafile_type": metadata_type.value,
-        }
-        content = self._get("meta_file", params)
+        content = self._get(request)
 
-        return self._catalog.write_raw_metadata(
-            content, self._asset_type, metadata_type
-        )
+        return self._catalog.write_raw_metadata(content, request)
