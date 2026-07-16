@@ -140,13 +140,12 @@ class FirstRateStocks(FirstRateEquities):
             "timeframe": timeframe.value,
             "adjustment": adjustment.value,
         }
-        target = (
-            self._raw_directory
-            / self._asset_type.value
-            / "delisted"
-            / kind
-            / selector.value
-            / timeframe.value
-            / adjustment.value
+        target = self._catalog.get_raw_path(
+            self._asset_type.value,
+            "delisted",
+            kind,
+            selector.value,
+            timeframe.value,
+            adjustment.value,
         )
         return self._fetch_zip_archive("delisted_data_file", params, target)

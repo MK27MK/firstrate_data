@@ -1,8 +1,10 @@
+import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Self
 
 import requests
+from dotenv import load_dotenv
 
 from firstrate_data.catalog import Catalog
 from firstrate_data.query_parameters import (
@@ -35,6 +37,17 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         self._user_id = user_id
         self._catalog = catalog
         self._base_url = base_url.rstrip("/")
+
+    @classmethod
+    def from_env(cls) -> Self:
+        """Build a loader from the environment: credentials here, store via
+        ``Catalog.from_env`` -- the download/persistence split, wired up."""
+        load_dotenv()
+        user_id = os.getenv("FIRSTRATE_USERID")
+        if user_id is None:
+            raise KeyError("FIRSTRATE_USERID not found.")
+        base_url = os.getenv("FIRSTRATE_BASE_URL", DEFAULT_BASE_URL)
+        return cls(user_id, Catalog.from_env(), base_url)
 
     @abstractmethod
     def download_historical_bars(
@@ -97,7 +110,15 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
             period,
             timeframe,
             adjustment,
+            ticker_range,
         )
+
+    def _fetch_zip_archive(
+        self, endpoint: str, params: dict[str, str], target: Path
+    ) -> Path:
+        # for asset-specific zip endpoints whose target the subclass keys itself
+        # (futures contracts, delisted stocks); the catalog owns the unzip-and-swap.
+        return self._catalog.write_raw_archive(self._get(endpoint, params), target)
 
     # Meta File Requests -----------------------------------------------
 

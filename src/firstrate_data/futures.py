@@ -78,12 +78,11 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
             "contract_files": contract_files.value,
             "timeframe": timeframe.value,
         }
-        target = (
-            self._raw_directory
-            / self._asset_type.value
-            / "contracts"
-            / contract_files.value
-            / timeframe.value
+        target = self._catalog.get_raw_path(
+            self._asset_type.value,
+            "contracts",
+            contract_files.value,
+            timeframe.value,
         )
         return self._fetch_zip_archive("futures_contract", params, target)
 
