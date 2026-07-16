@@ -99,7 +99,7 @@ def download_stocks_complete(
                 report._record(
                     f"delisted {timeframe}/{adjustment}/{selector.name.lower()}",
                     partial(
-                        stocks.download_delisted_historical_data,
+                        stocks.download_delisted_bars_archive,
                         selector=selector,
                         timeframe=timeframe,
                         adjustment=adjustment,

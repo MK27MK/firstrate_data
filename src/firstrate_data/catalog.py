@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from firstrate_data.query_parameters import (
     AssetType,
     ContinuousFuturesAdjustment,
+    ContractFiles,
+    DelistedArchive,
+    DelistedUpdate,
     EquitiesAdjustment,
     MetaDataType,
     Period,
@@ -55,6 +58,38 @@ class Catalog:
         self, asset_type: AssetType, metafile_type: MetaDataType
     ) -> Path:
         return self.get_raw_path(asset_type.value, "meta", metafile_type.value)
+
+    def get_delisted_archive_path(
+        self,
+        selector: DelistedArchive | DelistedUpdate,
+        timeframe: Timeframe,
+        adjustment: EquitiesAdjustment,
+    ) -> Path:
+
+        is_archive = isinstance(selector, DelistedArchive)
+        kind = "archive" if is_archive else "update"
+
+        return self.get_raw_path(
+            AssetType.STOCK,
+            "delisted",
+            kind,
+            selector.value,
+            timeframe.value,
+            adjustment.value,
+        )
+
+    def get_contracts_path(
+        self,
+        contract_files: ContractFiles,
+        timeframe: Timeframe,
+    ) -> Path:
+
+        return self.get_raw_path(
+            AssetType.FUTURES,
+            "contracts",
+            contract_files.value,
+            timeframe.value,
+        )
 
     # ------------------------------------------------------------------
     # writing methods
@@ -103,14 +138,37 @@ class Catalog:
 
         return target
 
-    def write_raw_archive(self, zip_file: bytes, target: Path) -> Path:
+    def write_raw_archive(
+        self,
+        zip_file: bytes,
+        selector: DelistedArchive | DelistedUpdate,
+        timeframe: Timeframe,
+        adjustment: EquitiesAdjustment,
+    ) -> Path:
         """Unzip an archive into an arbitrary raw sub-path and return it.
 
         For asset-specific zip endpoints (futures contracts, delisted stocks)
         whose folder layout has no dedicated ``get_*_path``; the caller builds
         ``target`` via :meth:`get_raw_path`.
         """
+
+        target = self.get_delisted_archive_path(selector, timeframe, adjustment)
+        target.mkdir(parents=True, exist_ok=True)
+
         self._unzip_and_write(zip_file, target)
+        return target
+
+    def write_raw_contracts(
+        self,
+        zip_file: bytes,
+        contract_files: ContractFiles,
+        timeframe: Timeframe,
+    ) -> Path:
+
+        target = self.get_contracts_path(contract_files, timeframe)
+
+        self._unzip_and_write(zip_file, target)
+
         return target
 
     # ------------------------------------------------------------------

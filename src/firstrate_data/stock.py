@@ -89,7 +89,7 @@ class FirstRateStocks(FirstRateEquities):
 
     # Delisted Ticker Data ---------------------------------------------
 
-    def download_delisted_historical_data(
+    def download_delisted_bars_archive(
         self,
         selector: DelistedArchive | DelistedUpdate,
         timeframe: Timeframe,
@@ -131,21 +131,37 @@ class FirstRateStocks(FirstRateEquities):
                 "UNADJUSTED delisted data is only available in the 1min timeframe"
             )
 
-        is_archive = isinstance(selector, DelistedArchive)
-        kind = "archive" if is_archive else "update"
+        return self._fetch_and_persist_delisted_bars(
+            selector,
+            timeframe,
+            adjustment,
+        )
 
+    # ------------------------------------------------------------------
+    # Comment
+    # ------------------------------------------------------------------
+
+    def _fetch_and_persist_delisted_bars(
+        self,
+        selector: DelistedArchive | DelistedUpdate,
+        timeframe: Timeframe,
+        adjustment: EquitiesAdjustment,
+    ) -> Path:
+
+        is_archive = isinstance(selector, DelistedArchive)
         # this endpoint takes no `type` param -- it is stock-only by definition
         params = {
             "archive_number" if is_archive else "update": selector.value,
             "timeframe": timeframe.value,
             "adjustment": adjustment.value,
         }
-        target = self._catalog.get_raw_path(
-            self._asset_type.value,
-            "delisted",
-            kind,
-            selector.value,
-            timeframe.value,
-            adjustment.value,
+
+        zip_file = self._get("data_file", params)
+
+        return self._catalog.write_raw_archive(
+            zip_file,
+            self._asset_type,
+            selector,
+            timeframe,
+            adjustment,
         )
-        return self._fetch_zip_archive("delisted_data_file", params, target)

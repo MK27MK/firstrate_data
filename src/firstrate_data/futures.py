@@ -73,19 +73,26 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
 
             Note : 1day data also includes open-interest in the final file. (therefore the data format for 1day futures data is {DateTime, Open, High, Low, Close, Volume,Open Interest})
         """
+
+        return self._fetch_and_persist_contracts(contract_files, timeframe)
+
+    def download_continuous_audit(self) -> Path:
+        """This function returns the individual futures contracts used in constructing the continuous data series."""
+        return self._fetch_and_persist_metafile(MetaDataType.CONTIN_AUDIT)
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _fetch_and_persist_contracts(
+        self, contract_files: ContractFiles, timeframe: Timeframe
+    ) -> Path:
+
         # this endpoint takes no `type` param -- it is futures-only by definition
         params = {
             "contract_files": contract_files.value,
             "timeframe": timeframe.value,
         }
-        target = self._catalog.get_raw_path(
-            self._asset_type.value,
-            "contracts",
-            contract_files.value,
-            timeframe.value,
-        )
-        return self._fetch_zip_archive("futures_contract", params, target)
+        zip_file = self._get("meta_file", params)
 
-    def download_continuous_audit(self) -> Path:
-        """This function returns the individual futures contracts used in constructing the continuous data series."""
-        return self._fetch_and_persist_metafile(MetaDataType.CONTIN_AUDIT)
+        return self._catalog.write_raw_contracts(zip_file, contract_files, timeframe)

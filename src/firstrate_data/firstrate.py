@@ -113,13 +113,6 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
             ticker_range,
         )
 
-    def _fetch_zip_archive(
-        self, endpoint: str, params: dict[str, str], target: Path
-    ) -> Path:
-        # for asset-specific zip endpoints whose target the subclass keys itself
-        # (futures contracts, delisted stocks); the catalog owns the unzip-and-swap.
-        return self._catalog.write_raw_archive(self._get(endpoint, params), target)
-
     # Meta File Requests -----------------------------------------------
 
     def _fetch_and_persist_metafile(self, metadata_type: MetaDataType) -> Path:
