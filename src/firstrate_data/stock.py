@@ -1,13 +1,82 @@
 from pathlib import Path
 
-from firstrate_data.firstrate import FirstRateEquities
+from firstrate_data.firstrate import FirstRateData
 from firstrate_data.query_parameters import (
     AssetType,
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
+    MetaDataType,
+    Period,
     Timeframe,
 )
+
+
+class FirstRateEquities(FirstRateData[EquitiesAdjustment]):
+    """Loader for stocks and ETFs, which share three things futures do not: the
+    split/dividend adjustments, the splits/dividends metafiles, and ticker_range."""
+
+    def download_historical_bars(
+        self,
+        period: Period,
+        timeframe: Timeframe,
+        adjustment: EquitiesAdjustment,
+        ticker_range: str | None = None,
+    ) -> Path:
+        """This function returns historical data archives (.txt files in csv format which are grouped into zip archives).
+
+        The archive is extracted into a request-scoped folder under the loader's
+        raw directory, keyed by every request parameter, and that folder's Path
+        is returned. If the folder already exists it is wiped and replaced, so it
+        always reflects exactly one archive.
+
+        Parameters
+        ----------
+        period : Period
+            Specifies the period to request data for. 'full' requests the entire historical archive, 'month' requests the last 30 days, 'week' requests the current trading week (starting on Monday), 'day' requests the last trading day.
+
+            To request the full historical archive you also need to specify a ticker_range parameter (see below).
+        timeframe : Timeframe
+            Specifies the period the timeframe of the data. '1min' will request 1-minute intraday bars, '5min' requests 5-minute bars etc.
+            Note : bars with zero volumes are not included
+        adjustment : EquitiesAdjustment
+            Specifies the type of adjustment. 'adj_split' is data adjusted for splits only, 'adj_splitdiv' is data adjusted for both splits and dividends, 'UNADJUSTED' is raw data without any splits or dividend adjustments. UNADJUSTED data is only available in the 1min and 1day timeframes.
+        ticker_range : str | None
+            Only to be used when requesting the full historical dataset (ie 'period=full'). This parameter specifies the first letter of the ticker, for example 'ticker_range=C' will request all tickers beginning with the letter C
+
+            This parameter can only be used when requesting the full historical archive (ie 'period=full')
+        """
+        # the delisted endpoint allows UNADJUSTED on 1min *only* -- same enum,
+        # narrower rule, so each endpoint guards its own
+        if adjustment is EquitiesAdjustment.UNADJUSTED and timeframe not in (
+            Timeframe.MIN_1,
+            Timeframe.DAY_1,
+        ):
+            raise ValueError(
+                "UNADJUSTED data is only available in the 1min and 1day timeframes"
+            )
+        if period is Period.FULL and ticker_range is None:
+            raise ValueError("ticker_range (A-Z) is required when period=full")
+        if ticker_range is not None:
+            if period is not Period.FULL:
+                raise ValueError("ticker_range can only be used when period=full")
+            ticker_range = ticker_range.upper()
+            if len(ticker_range) != 1 or not ticker_range.isalpha():
+                raise ValueError("ticker_range must be a single letter A-Z")
+
+        return self._fetch_and_persist_historical_bars(
+            period, timeframe, adjustment, ticker_range
+        )
+
+    # Splits / Dividends Requests --------------------------------------
+
+    def download_splits(self) -> Path:
+        """Historical splits: {date,split-ratio}, ratio of new to old shares."""
+        return self._fetch_and_persist_metafile(MetaDataType.SPLITS)
+
+    def download_dividends(self) -> Path:
+        """Historical dividends: {ex-dividend date,dividend amount}."""
+        return self._fetch_and_persist_metafile(MetaDataType.DIVIDENDS)
 
 
 class FirstRateStocks(FirstRateEquities):
@@ -80,4 +149,4 @@ class FirstRateStocks(FirstRateEquities):
             / timeframe.value
             / adjustment.value
         )
-        return self._fetch_archive("delisted_data_file", params, target)
+        return self._fetch_zip_archive("delisted_data_file", params, target)

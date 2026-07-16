@@ -23,7 +23,7 @@ class Timeframe(StrEnum):
     DAY_1 = "1day"
 
 
-class MetaFileType(StrEnum):
+class MetaDataType(StrEnum):
     # never user-facing: reached only through the download_* method of the
     # loader whose asset type supports it
     SPLITS = auto()
