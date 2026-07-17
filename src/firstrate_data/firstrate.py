@@ -14,9 +14,19 @@ from firstrate_data.query_parameters import (
     Period,
     Timeframe,
 )
+from firstrate_data.progress import NullProgress, ProgressReporter
 from firstrate_data.request import BarsRequest, MetafileRequest, Request
 
 DEFAULT_BASE_URL = "https://firstratedata.com/api"
+
+# small enough that the bar moves on a slow line, large enough that a multi-GB
+# archive is not paid for one syscall at a time
+_CHUNK_SIZE = 1 << 16
+
+
+def _describe(request: Request) -> str:
+    """A request as one line of bar label: ``data_file stock/full/1min/adj_split/A``."""
+    return f"{request.endpoint} {'/'.join(request.to_params().values())}"
 
 
 # this syntax has been introduced in 3.12 and it works like ts generics
@@ -33,21 +43,29 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         user_id: str,
         catalog: Catalog,
         base_url: str = DEFAULT_BASE_URL,
+        progress: ProgressReporter | None = None,
     ):
         self._user_id = user_id
         self._catalog = catalog
         self._base_url = base_url.rstrip("/")
+        # silence by default: a loader used as a library draws nothing unasked,
+        # and the bundle sweep -- the caller who wants a bar -- passes one in
+        self._progress = NullProgress() if progress is None else progress
 
     @classmethod
-    def from_env(cls) -> Self:
+    def from_env(cls, progress: ProgressReporter | None = None) -> Self:
         """Build a loader from the environment: credentials here, store via
-        ``Catalog.from_env`` -- the download/persistence split, wired up."""
+        ``Catalog.from_env`` -- the download/persistence split, wired up.
+
+        ``progress`` is not environment-derived and is passed straight through:
+        where a bar should be drawn is a caller's decision, not a deployment's.
+        """
         load_dotenv()
         user_id = os.getenv("FIRSTRATE_USERID")
         if user_id is None:
             raise KeyError("FIRSTRATE_USERID not found.")
         base_url = os.getenv("FIRSTRATE_BASE_URL", DEFAULT_BASE_URL)
-        return cls(user_id, Catalog.from_env(), base_url)
+        return cls(user_id, Catalog.from_env(), base_url, progress)
 
     @abstractmethod
     def download_historical_bars(
@@ -75,13 +93,30 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
     # Transport / persistence ------------------------------------------
 
     def _get(self, request: Request) -> bytes:
-        response = requests.get(
+        # stream=True is what makes progress observable at all: without it
+        # requests returns only once the last byte of a multi-GB archive has
+        # landed, and there is nothing to report until there is nothing left to
+        # report. The archive is still assembled whole in memory, since that is
+        # what the catalog takes.
+        with requests.get(
             f"{self._base_url}/{request.endpoint}",
             params={**request.to_params(), "userid": self._user_id},
             timeout=120,
-        )
-        response.raise_for_status()
-        return response.content
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+
+            # absent on a chunked response: a bar without an ETA, not a failure
+            declared = response.headers.get("Content-Length")
+            total = int(declared) if declared is not None else None
+
+            archive = bytearray()
+            with self._progress.track(_describe(request), total, "B") as advance:
+                for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                    archive.extend(chunk)
+                    advance(len(chunk))
+
+        return bytes(archive)
 
     def _fetch_and_persist_historical_bars(
         self, request: BarsRequest[AdjustmentT]
