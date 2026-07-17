@@ -1,4 +1,4 @@
-# Hive-partitioned Parquet, and vintages that are never merged
+# Hive-partitioned Parquet, and snapshots that are never merged
 
 ADR 0004 said a catalog "naturally grows a read side later" and kept the store domain-aware
 against that day. This is that day. `nautilus_trader`'s `ParquetDataCatalog` was evaluated
@@ -30,26 +30,26 @@ mtimes cannot stand in: `extractall` takes `.txt` mtimes from the zip's own `dat
 they are the vendor's, while the directory's is ours — two semantics in one tree, and neither
 survives a `cp`.
 
-Both are fixed by putting the fetch date in the path. Every raw download now lands under a
-vintage segment (`.../adj_split/A/2026-01-05/`), and retention is one number: keep one date
-for `full`, keep every date for the increments. That asymmetry is honest — a `full` is
+Both are fixed by putting the fetch date in the path. Every raw download now lands as a dated
+snapshot (`.../adj_split/A/2026-01-05/`), and retention is one number: keep one date for
+`full`, keep every date for the increments. That asymmetry is honest — a `full` is
 hundreds of GB and a week of 1min bars is a rounding error — and it is a policy over a uniform
 layout, not a second code path. It also removes a real window: dated directories are written
 beside the old one and the old one is dropped only on success, where today's staging swap
 deletes `target` before `replace` lands.
 
-`get_bars_path` therefore takes `(request, vintage)`. The vintage does not go on `BarsRequest`:
-CONTEXT.md defines a request as the parameters identifying *a slice of the dataset*, and when
-we asked identifies neither a slice nor the dataset. A request stays exactly the wire
-contract. A required second argument is not ADR 0004's clobber returning — that defect was a
-key computed from a *subset* by a method blind to a field; `--strict` cannot let this one be
-omitted. A `_vintage.json` sidecar rides along, and earns its place not as the date (the path
-has that) but as the record of *which request* produced a directory, so `sync()` reads
-provenance instead of inverting a path with regexes.
+`get_bars_path` therefore takes `(request, snapshot_date)`. The date does not go on
+`BarsRequest`: CONTEXT.md defines a request as the parameters identifying *a slice of the
+dataset*, and when we asked identifies neither a slice nor the dataset. A request stays exactly
+the wire contract. A required second argument is not ADR 0004's clobber returning — that
+defect was a key computed from a *subset* by a method blind to a field; `--strict` cannot let
+this one be omitted. A `_snapshot.json` record rides along in the directory, and earns its
+place not as the date (the path has that) but as the record of *which request* produced the
+directory, so `sync()` reads provenance instead of inverting a path with regexes.
 
-## Vintages are replaced, never merged
+## Snapshots are replaced, never merged
 
-The reframe that "period is overlapping vintages of the same bars" is right about the key and
+The reframe that "period is overlapping snapshots of the same bars" is right about the key and
 wrong about the arithmetic. Adjusted prices are not append-only: every corporate action
 rewrites all history before it. Append January's `adj_split` full to July's `week` across a
 4:1 split and the seam carries an artificial 4x gap — silent, and indistinguishable from a
@@ -61,22 +61,23 @@ splits/dividends metafile shows no action for that ticker since the partition's 
 otherwise the partition is stale and wants a fresh `full`. The metafiles stop being trivia and
 become the guard. (Measured since, and the guard does not survive it: the metafile leads the
 restatement by an unpredictable per-ticker interval, so it cannot time the refetch. See "The
-restatement lags the metafile" below — the vintage rule stands, this guard does not.) Deriving adjusted series from `UNADJUSTED` instead was considered and
+restatement lags the metafile" below — the snapshot rule stands, this guard does not.)
+Deriving adjusted series from `UNADJUSTED` instead was considered and
 rejected: `data_file` serves `UNADJUSTED` at `1min` and `1day` only (`delisted_data_file` at
 `1min` only), so 5min/30min/1hour would have to be re-aggregated by us — and per the source's
 own shape, intraday equity bars span 04:00-20:00 and omit zero-volume minutes, so that rollup
 is not the vendor's bar and would not match.
 
-Each vintage writes its own file: `FILENAME_PATTERN` is keyed on it. This is not tidiness.
-Measured, `COPY ... PARTITION_BY (ticker), OVERWRITE_OR_IGNORE` reuses `data_0.parquet`, so an
-increment overwrote a full and 100 rows became 10 with no error — the ticker_range clobber of
-ADR 0004, reincarnated one layer down. Distinct names append correctly (110 rows) and leave
-the vintage legible in the filename.
+Each snapshot writes its own file: `FILENAME_PATTERN` is keyed on its date. This is not
+tidiness. Measured, `COPY ... PARTITION_BY (ticker), OVERWRITE_OR_IGNORE` reuses
+`data_0.parquet`, so an increment overwrote a full and 100 rows became 10 with no error — the
+ticker_range clobber of ADR 0004, reincarnated one layer down. Distinct names append correctly
+(110 rows) and leave the snapshot date legible in the filename.
 
 ## The layout
 
 ```
-{asset_type}/{dataset}/{adjustment}/{timeframe}/{ticker}/v{vintage}_{i}.parquet
+{asset_type}/{dataset}/{adjustment}/{timeframe}/{ticker}/{snapshot_date}_{i}.parquet
 ```
 
 `dataset` is `listed|delisted` for stocks, `continuous` for futures, and `contract` when
@@ -89,8 +90,9 @@ rest. A Hive key is a column that costs no bytes, so it is both: one glob answer
 survivorship bias by default, `WHERE dataset='listed'` prunes (measured: 1 file of 3), and a
 ticker reused by a later company stays distinguishable from its dead namesake.
 
-The download-side key evaporates here, as it should: `period` is a vintage, `ticker_range` is a
-download partition, and the delisted selectors (`archive_number`, `update`) are slices of one
+The download-side key evaporates here, as it should: `period` names a snapshot's scope,
+`ticker_range` is a download partition, and the delisted selectors (`archive_number`,
+`update`) are slices of one
 fetch. Individual contracts stay out of v1 — a contract has no adjustment, since adjustment
 exists to erase roll jumps and a contract is the thing being stitched, and `contin_UNadj` is
 still the continuous construction. Forcing `adjustment=none` would be NT's crime with our own
@@ -113,9 +115,10 @@ a guess would corrupt silently and break the promise that Parquet is a faithful 
 
 ## Reading
 
-`sync()` is the whole update surface: it scans `raw/`, reads sidecars, diffs against the
-manifest, and ingests what is missing in vintage order — full first, increments after, with
-the splits guard. It is idempotent, so it is also the rebuild, and also the cure for a Ctrl-C.
+`sync()` is the whole update surface: it scans `raw/`, reads the snapshot records, diffs
+against the manifest, and ingests what is missing in date order — full first, increments
+after, with the splits guard. It is idempotent, so it is also the rebuild, and also the cure
+for a Ctrl-C.
 It is what makes the ~400GB already on disk ingestable at all, which a download-time hook
 never could. Coupling ingest into `download_*` would re-fuse the transport and the store that
 ADR 0004 just separated, and would still need reconciliation after any interruption.
@@ -141,12 +144,13 @@ also rejects a legitimate call passing an `AssetType` variable — and the cure 
 
 ## Consequences
 
-The manifest is one row per partition-vintage (keys, basis date, coverage, row count),
+The manifest is one row per partition-snapshot (keys, basis date, coverage, row count),
 rewritten wholesale, holding nothing that a scan could not recover — its job is that a scan
 costs 291ms and `sync()` should not pay it per call. `duckdb` joins the core dependencies;
 `nautilus_trader` stays an extra, for a `to_nautilus()` that is a conversion and never a
 re-point. The archive already on disk needs a one-off migration — rename each raw directory
-under a date derived from its mtime and write its sidecar — before the first `sync()`; mtime
+under a date derived from its mtime and write its snapshot record — before the first
+`sync()`; mtime
 is weak evidence, which is exactly why it is a one-time, inspectable step and not the design.
 `Catalog` stays one class, since CONTEXT.md already says the store is the one thing that knows
 its layout; if the raw side and the query side stop sharing a reason to change, `RawStore` is
@@ -156,15 +160,15 @@ Still untested: the bar timezone. `UNADJUSTED`'s legal timeframes differ per end
 cannot live on the enum, so a read asking for `5min UNADJUSTED` returns an empty relation
 rather than an error — a per-method guard, as in writing.
 
-## The vintage assumption, tested
+## The snapshot assumption, tested
 
-The claim the whole vintage rule stands on — that FirstRate rewrites adjusted history when a
+The claim the whole snapshot rule stands on — that FirstRate rewrites adjusted history when a
 corporate action lands — was recorded above as deliberately untested. It has now been tested.
 It holds, and the test found a second thing that the splits guard above does not survive
 unamended.
 
 The intended test was to diff a fresh `full` against an older one on disk. That was not
-available: `DATA_PATH` holds no archive, so there is no older vintage to diff against. The
+available: `DATA_PATH` holds no archive, so there is no older snapshot to diff against. The
 substitute needs no archive and is stronger, because it reads the restatement out of a single
 download: an adjusted bar whose price encodes an action dated *after* that bar is a bar that
 cannot have carried the same price before the action. All figures below are one download,
@@ -177,7 +181,7 @@ until `2026-07-13`, 1 after. The bar for `2019-05-08`, seven years before the la
 reads `5.875` unadjusted and `2350.0` adjusted — a factor of 400, which is 20 × 20. Twenty of
 that came from a split effective four days before the download. The same bar therefore read
 `117.5` at any point between the two splits, and `5.875` before either: one bar, three
-different adjusted closes in thirteen months. Vintages of `adj_split` are not comparable, and
+different adjusted closes in thirteen months. Snapshots of `adj_split` are not comparable, and
 appending one to another across `2026-07-13` would splice a 20x cliff into `XAIR`'s 2019.
 
 Dividends do the same, more finely. `XOM` carries 107 dividends and one split (`2001-07-19`,

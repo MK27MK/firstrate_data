@@ -99,43 +99,99 @@ contains it), every date for the increments.
 Archives are unzipped to the side and swapped in whole, so a folder either holds one
 complete archive or does not exist — a Ctrl-C mid-unzip never leaves a truncated one.
 
-## Querying
+## The parquet catalog
 
 The queryable side is Hive-partitioned Parquet derived from the raw snapshots.
 While the snapshots are on disk, `rm -rf` the parquet tree and `sync()` rebuilds
 it with no network.
 
+### Converting raw data
+
+`sync()` scans `raw/`, diffs against a manifest of what is already ingested, and
+converts whatever is missing. It never raises: every directory's outcome lands in
+the returned `SyncReport`.
+
 ```python
 from firstrate_data.catalog import Catalog
-from firstrate_data.query_parameters import Dataset, EquitiesAdjustment, Timeframe
 
-catalog = Catalog.from_env()
-catalog.sync()  # raw/ -> parquet. Idempotent: also the rebuild.
+catalog = Catalog.from_env()  # reads DATA_PATH
 
-# a lazy DuckDB relation, not rows -- 400GB does not fit in a list
-bars = catalog.stock_bars(Timeframe.DAY_1, EquitiesAdjustment.SPLIT, ticker="AAPL")
-bars.aggregate("avg(close)").show()
+report = catalog.sync()  # raw/ -> parquet. Idempotent: also the rebuild.
+
+print(f"ingested {len(report.ingested)} snapshot(s)")
+for source, reason in report.skipped:  # nothing to do, and re-running won't change that
+    print(f"skipped {source}: {reason}")
+for source, error in report.failed:  # should have ingested and didn't
+    print(f"FAILED {source}: {error}")
+```
+
+Bars land in a uniform seven-column schema (`ts, open, high, low, close, volume,
+open_interest` — the last NULL where the source omits it), partitioned so every
+selector is also a directory level:
+
+```
+DATA_PATH/parquet/{asset_type}/{dataset}/{adjustment}/{timeframe}/{ticker}/{date}_{i}.parquet
+```
+
+Snapshots are **replaced, never merged**. Adjusted prices are not append-only —
+every corporate action rewrites the history before it — so a newer `full` replaces
+an older one, and `sync()` refuses to append an increment to an adjusted series
+(it lands in `report.skipped`; re-fetch `period=full`). Unadjusted series are
+extended in place, minus whatever the partition already covers, so re-syncing an
+overlapping `week` never doubles a bar.
+
+`ts` is stored exactly as the vendor delivers it, naive: the source does not state
+a timezone, so any conversion is a view the caller applies.
+
+### Queries
+
+Reads return a lazy `duckdb.DuckDBPyRelation` — the engine, not rows. Filter,
+aggregate, join, or hand it to pandas/Arrow without materializing 400GB.
+
+```python
+from firstrate_data.query_parameters import (
+    ContinuousFuturesAdjustment,
+    Dataset,
+    EquitiesAdjustment,
+    Timeframe,
+)
+
+# one ticker, daily, split-adjusted
+aapl = catalog.stock_bars(Timeframe.DAY_1, EquitiesAdjustment.SPLIT, ticker="AAPL")
+aapl.aggregate("min(ts), max(ts), count(*)").show()
+frame = aapl.df()  # pandas DataFrame, materialized only now (needs pandas installed)
+
+# SQL over a relation
+recent = aapl.filter("ts >= DATE '2026-01-01'").order("ts")
 
 # delisted tickers are in by default: the plain question is the unbiased one,
 # and asking for `Dataset.LISTED` is what costs you survivorship
 listed_only = catalog.stock_bars(
     Timeframe.DAY_1, EquitiesAdjustment.SPLIT, dataset=Dataset.LISTED
 )
+
+# futures continuous series
+es = catalog.futures_bars(
+    Timeframe.DAY_1, ContinuousFuturesAdjustment.RATIO, ticker="ES"
+)
+
+# across the whole tree; every partition key is also a column, so an
+# unfiltered call carries one row per adjustment a bar was fetched under
+catalog.bars(timeframe=Timeframe.DAY_1).aggregate(
+    "asset_type, adjustment, count(*)"
+).show()
 ```
+
+A selector that matches nothing returns an empty relation of the right shape, not
+an error — "no data" is an answer.
 
 The selectors **build the glob** rather than filter it, which is what makes a fine
 slice fast (~970x over a wide glob with a `WHERE`, measured at 3000 partitions).
-The asset type is in the method name (`stock_bars` / `futures_bars`), so pairing
-futures with an equities adjustment is unrepresentable.
+Prefer them over `.filter(...)` for anything that is a partition key. The asset
+type is in the method name (`stock_bars` / `futures_bars`), so pairing futures
+with an equities adjustment is unrepresentable.
 
-Snapshots are **replaced, never merged**. Adjusted prices are not append-only —
-every corporate action rewrites the history before it — so a newer `full` replaces
-an older one, and `sync()` refuses to append an increment to an adjusted series
-(it reports the refusal; re-fetch `period=full`). Unadjusted series are extended
-in place, minus whatever the partition already covers.
-
-See `docs/adr/0005-hive-parquet-read-side-and-vintage-reconciliation.md` (the code's
-"snapshot" is the ADR's "vintage").
+See `docs/adr/0005-hive-parquet-read-side-and-snapshot-reconciliation.md`.
 
 ## Progress
 
