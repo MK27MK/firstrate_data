@@ -1,2 +1,12 @@
 __pycache__/
 *.egg-info/
+.venv/
+
+# agents
+.claude/
+CONTEXT.md
+
+# venv
+.env
+.env.*
+!.env.example
