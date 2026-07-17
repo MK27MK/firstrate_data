@@ -59,7 +59,9 @@ So the rule is per-adjustment, which nothing before this stated. `UNADJUSTED` is
 and increments always apply. For `adj_split`/`adj_splitdiv` an increment applies only if the
 splits/dividends metafile shows no action for that ticker since the partition's basis date;
 otherwise the partition is stale and wants a fresh `full`. The metafiles stop being trivia and
-become the guard. Deriving adjusted series from `UNADJUSTED` instead was considered and
+become the guard. (Measured since, and the guard does not survive it: the metafile leads the
+restatement by an unpredictable per-ticker interval, so it cannot time the refetch. See "The
+restatement lags the metafile" below — the vintage rule stands, this guard does not.) Deriving adjusted series from `UNADJUSTED` instead was considered and
 rejected: `data_file` serves `UNADJUSTED` at `1min` and `1day` only (`delisted_data_file` at
 `1min` only), so 5min/30min/1hour would have to be re-aggregated by us — and per the source's
 own shape, intraday equity bars span 04:00-20:00 and omit zero-volume minutes, so that rollup
@@ -150,9 +152,69 @@ is weak evidence, which is exactly why it is a one-time, inspectable step and no
 its layout; if the raw side and the query side stop sharing a reason to change, `RawStore` is
 the seam.
 
-Untested claims, deliberately: that FirstRate's adjusted history is rewritten by corporate
-actions is how adjusted data works everywhere, but it is *falsifiable here* by pulling two
-fulls across a known split and diffing, and the whole vintage rule stands on it. The bar
-timezone is unverified. `UNADJUSTED`'s legal timeframes differ per endpoint and cannot live on
-the enum, so a read asking for `5min UNADJUSTED` returns an empty relation rather than an
-error — a per-method guard, as in writing.
+Still untested: the bar timezone. `UNADJUSTED`'s legal timeframes differ per endpoint and
+cannot live on the enum, so a read asking for `5min UNADJUSTED` returns an empty relation
+rather than an error — a per-method guard, as in writing.
+
+## The vintage assumption, tested
+
+The claim the whole vintage rule stands on — that FirstRate rewrites adjusted history when a
+corporate action lands — was recorded above as deliberately untested. It has now been tested.
+It holds, and the test found a second thing that the splits guard above does not survive
+unamended.
+
+The intended test was to diff a fresh `full` against an older one on disk. That was not
+available: `DATA_PATH` holds no archive, so there is no older vintage to diff against. The
+substitute needs no archive and is stronger, because it reads the restatement out of a single
+download: an adjusted bar whose price encodes an action dated *after* that bar is a bar that
+cannot have carried the same price before the action. All figures below are one download,
+`period=full`, `timeframe=1day`, `ticker_range=X`, fetched 2026-07-17 into a temp dir.
+
+`XAIR` has two splits on record, `2025-07-14` and `2026-07-13`, each `0.05` — 1:20 reverse,
+twice. Across its 1800 bars the ratio `adj_split/UNADJUSTED` takes exactly three values and
+steps exactly twice, on precisely those two dates and nowhere else: 400 before `2025-07-14`, 20
+until `2026-07-13`, 1 after. The bar for `2019-05-08`, seven years before the later split,
+reads `5.875` unadjusted and `2350.0` adjusted — a factor of 400, which is 20 × 20. Twenty of
+that came from a split effective four days before the download. The same bar therefore read
+`117.5` at any point between the two splits, and `5.875` before either: one bar, three
+different adjusted closes in thirteen months. Vintages of `adj_split` are not comparable, and
+appending one to another across `2026-07-13` would splice a 20x cliff into `XAIR`'s 2019.
+
+Dividends do the same, more finely. `XOM` carries 107 dividends and one split (`2001-07-19`,
+2:1). The ratio `adj_splitdiv/adj_split` steps 89 times over 6672 bars and every step lands on
+a dividend ex-date. Its `2015-06-15` bar reads `52.7103` today against `83.72` on `adj_split`,
+a cumulative factor of `0.6296`; the `2026-02-12` dividend alone rescaled all prior history by
+`0.99337876`, so that same 2015 bar read `53.0616` before February and `52.7103` after.
+
+The control holds. `XOM`'s `UNADJUSTED/adj_split` ratio has exactly one step above 0.1% in 6672
+bars — `2001-07-19`, x0.5, its only split — and not one of its 107 dividends perturbs it.
+`UNADJUSTED` is not a function of the corporate-action set; the adjusted series are. What that
+control does *not* establish is that the vendor never revises raw prices over time, which is a
+different claim and stays untested for want of an archive to diff. If raw bars are ever found
+to move, `UNADJUSTED`'s append-only rule above is what breaks, not this section.
+
+## The restatement lags the metafile, per ticker
+
+The same download refutes the premise the splits guard rests on — that a metafile action since
+the basis date implies the partition has been restated. The two are not synchronised.
+
+`XXII` split `2026-06-12` at `0.05`. Its unadjusted series shows the mechanical jump, `0.316`
+on `2026-06-11` to `6.545` on `2026-06-12`. Its `adj_split` series shows *the same jump*: on
+`2026-06-11` `adj_split` equals `UNADJUSTED` equals `0.316`. Thirty-five days on, the split has
+not been applied, and `XXII`'s adjusted history today carries exactly the artificial 20x seam
+this ADR cites as the reason never to merge — shipped by the vendor, inside a single `full`.
+Its previous split, `2026-01-26`, *is* applied, so the file was regenerated somewhere between
+the two. `XAIR`'s `2026-07-13` split, four days old, is applied. The lag is per-ticker, not a
+constant. Dividends behave the same way: of 14 `X` payers whose series cover their last
+recorded ex-date, 7 are current and 7 lag by 33 to 121 days, clustered near one quarter —
+`XOM`'s `2026-05-15` dividend is in the metafile and absent from its prices.
+
+So the metafile *leads* the restatement by an unpredictable interval, and the guard's
+`action since basis date -> refetch the full` is wrong in both directions. It fires while the
+vendor's own `full` is still unrestated, so the refetch returns the same numbers and re-arms
+nothing; and when the restatement does land, no metafile row changes, so the guard stays
+silent and the partition is stale for good. A guard keyed on the metafile cannot see the event
+it needs to see. Detecting restatement means comparing the vendor's bytes against what we
+already hold — which is a decision this ADR has not made, and is the open question it leaves.
+That `XXII` is mid-flight right now makes it cheap to settle: its adjusted 2019 history will
+change under a re-download, with no metafile row moving to announce it.
