@@ -82,35 +82,35 @@ futures.download_continuous_audit()
 ```
 
 Each call returns the `Path` it wrote. Every download lands under the date it was
-fetched — its **vintage** — because the vendor's answer to an unchanged question
-changes over time, and a store that overwrites cannot tell you that it did.
+fetched — its **snapshot date** — because the vendor's answer to an unchanged
+question changes over time.
 
 ```
-DATA_PATH/raw/{asset}/{period}/{timeframe}/{adjustment}[/{ticker_range}]/{vintage}/
-DATA_PATH/raw/{asset}/meta/{metafile}/{vintage}/         splits, dividends, contin_audit
-DATA_PATH/raw/futures/contracts/{archive|update}/{timeframe}/{vintage}/
-DATA_PATH/raw/stock/delisted/{archive|update}/{selector}/{timeframe}/{adjustment}/{vintage}/
+DATA_PATH/raw/{asset}/{period}/{timeframe}/{adjustment}[/{ticker_range}]/{date}/
+DATA_PATH/raw/{asset}/meta/{metafile}/{date}/           splits, dividends, contin_audit
+DATA_PATH/raw/futures/contracts/{archive|update}/{timeframe}/{date}/
+DATA_PATH/raw/stock/delisted/{archive|update}/{selector}/{timeframe}/{adjustment}/{date}/
 ```
 
-Each vintage directory carries a `_vintage.json` sidecar recording the request that
-produced it. Retention is one number: one date for a `full`, every date for the
-increments — a `full` wholly contains the one before it, and a week of 1min bars is a
-rounding error.
+Each snapshot directory carries a `_snapshot.json` file recording the request that
+produced it. Retention is one number: one date for a `full` (a newer one wholly
+contains it), every date for the increments.
 
 Archives are unzipped to the side and swapped in whole, so a folder either holds one
 complete archive or does not exist — a Ctrl-C mid-unzip never leaves a truncated one.
 
 ## Querying
 
-`raw/` is the truth. The queryable side is Hive-partitioned Parquet derived from it:
-`rm -rf` it and `sync()` rebuilds it with no network.
+The queryable side is Hive-partitioned Parquet derived from the raw snapshots.
+While the snapshots are on disk, `rm -rf` the parquet tree and `sync()` rebuilds
+it with no network.
 
 ```python
 from firstrate_data.catalog import Catalog
 from firstrate_data.query_parameters import Dataset, EquitiesAdjustment, Timeframe
 
 catalog = Catalog.from_env()
-catalog.sync()  # raw/ -> parquet. Idempotent: also the rebuild, also the Ctrl-C cure.
+catalog.sync()  # raw/ -> parquet. Idempotent: also the rebuild.
 
 # a lazy DuckDB relation, not rows -- 400GB does not fit in a list
 bars = catalog.stock_bars(Timeframe.DAY_1, EquitiesAdjustment.SPLIT, ticker="AAPL")
@@ -123,21 +123,19 @@ listed_only = catalog.stock_bars(
 )
 ```
 
-The selectors **build the glob** rather than filter it: at 3000 partitions a fine slice
-costs 291ms through a wide glob with a `WHERE` and 0.3ms through a narrow one, and this
-tree will hold ~150k leaves.
+The selectors **build the glob** rather than filter it, which is what makes a fine
+slice fast (~970x over a wide glob with a `WHERE`, measured at 3000 partitions).
+The asset type is in the method name (`stock_bars` / `futures_bars`), so pairing
+futures with an equities adjustment is unrepresentable.
 
-The asset type is in the method name (`stock_bars` / `futures_bars`), so pairing futures
-with an equities adjustment is unrepresentable rather than merely wrong — on the read
-side that pairing has no server to reject it, and would just return nothing.
+Snapshots are **replaced, never merged**. Adjusted prices are not append-only —
+every corporate action rewrites the history before it — so a newer `full` replaces
+an older one, and `sync()` refuses to append an increment to an adjusted series
+(it reports the refusal; re-fetch `period=full`). Unadjusted series are extended
+in place, minus whatever the partition already covers.
 
-Vintages are **replaced, never merged**. Adjusted prices are not append-only: every
-corporate action rewrites the history before it, so a newer `full` replaces an older one
-rather than extending it, and `sync()` refuses to append an increment to an adjusted
-series (it reports the refusal; re-fetch `period=full`). Unadjusted series have no
-adjustment basis and are extended in place, minus whatever the partition already covers.
-
-See `docs/adr/0005-hive-parquet-read-side-and-vintage-reconciliation.md`.
+See `docs/adr/0005-hive-parquet-read-side-and-vintage-reconciliation.md` (the code's
+"snapshot" is the ADR's "vintage").
 
 ## Progress
 

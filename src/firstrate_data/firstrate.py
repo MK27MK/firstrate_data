@@ -77,10 +77,9 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
     ) -> Path:
         """This function returns historical data archives (.txt files in csv format which are grouped into zip archives).
 
-        The archive is extracted into a request-scoped folder under the loader's
-        raw directory, keyed by every request parameter, and that folder's Path
-        is returned. If the folder already exists it is wiped and replaced, so it
-        always reflects exactly one archive.
+        The archive is extracted into a folder under the loader's raw
+        directory, keyed by every request parameter and dated by the fetch,
+        and that folder's Path is returned.
 
         See the overriding subclass for the parameters its asset type accepts:
         they differ (stocks take a ticker_range, futures do not; the adjustment
@@ -91,15 +90,10 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
     # helpers
     # ------------------------------------------------------------------
 
-    def _fetched_on(self) -> date:
-        """The vintage the download about to happen will carry.
-
-        The loader is where the store learns *when*, because it is the only layer
-        that knows a fetch is happening at all. It is not a field of the request:
-        a request is the parameters identifying a slice of the dataset, and when
-        we asked identifies neither a slice nor the dataset -- so the request
-        stays exactly the wire contract. See ADR 0005.
-        """
+    def _snapshot_date(self) -> date:
+        """The date the download about to happen will be stored under."""
+        # on the loader, not the request: a request identifies a slice of the
+        # dataset, and when we asked identifies neither
         return date.today()
 
     # Transport / persistence ------------------------------------------
@@ -141,7 +135,7 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         """
         zip_file = self._get(request)
 
-        return self._catalog.write_raw_bars(zip_file, request, self._fetched_on())
+        return self._catalog.write_raw_bars(zip_file, request, self._snapshot_date())
 
     # Meta File Requests -----------------------------------------------
 
@@ -153,4 +147,4 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         """
         content = self._get(request)
 
-        return self._catalog.write_raw_metadata(content, request, self._fetched_on())
+        return self._catalog.write_raw_metadata(content, request, self._snapshot_date())

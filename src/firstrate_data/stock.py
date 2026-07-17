@@ -139,4 +139,6 @@ class FirstRateStocks(FirstRateEquities):
         request = DelistedRequest(selector, timeframe, adjustment)
         zip_file = self._get(request)
 
-        return self._catalog.write_raw_delisted(zip_file, request, self._fetched_on())
+        return self._catalog.write_raw_delisted(
+            zip_file, request, self._snapshot_date()
+        )

@@ -17,14 +17,10 @@ from firstrate_data.query_parameters import (
 
 
 class Request(Protocol):
-    """One request to one endpoint, with the endpoint bound to the shape.
+    """One request to one endpoint.
 
-    ``_get`` takes a Request rather than an ``(endpoint, params)`` pair so that a
-    request cannot be sent to the wrong URL: the endpoint is not an argument the
-    caller supplies, it is a property of the type being sent. Two live bugs
-    predate this -- delisted bars were fetched from ``data_file`` and futures
-    contracts from ``meta_file`` -- and both were a free-form string away from
-    correct.
+    The endpoint is a property of the request type, not an argument the
+    caller supplies, so a request cannot be sent to the wrong URL.
     """
 
     endpoint: ClassVar[str]
@@ -38,10 +34,9 @@ class Request(Protocol):
 class BarsRequest[AdjT: EquitiesAdjustment | ContinuousFuturesAdjustment]:
     """Historical bars for one asset type.
 
-    Generic on the adjustment for the same reason the loader is (ADR 0002): the
-    accepted values are per-asset-type, so ``BarsRequest[EquitiesAdjustment]``
-    and ``BarsRequest[ContinuousFuturesAdjustment]`` are different requests and
-    the base's ``AdjustmentT`` carries the distinction all the way down.
+    Generic on the adjustment because the accepted values are
+    per-asset-type: ``BarsRequest[EquitiesAdjustment]`` and
+    ``BarsRequest[ContinuousFuturesAdjustment]`` are different requests.
     """
 
     endpoint: ClassVar[str] = "data_file"
@@ -54,12 +49,7 @@ class BarsRequest[AdjT: EquitiesAdjustment | ContinuousFuturesAdjustment]:
 
     @property
     def dataset(self) -> Dataset:
-        """Which body of data these bars join once at rest.
-
-        One endpoint serves two datasets -- the listed equities archive and the
-        futures continuous series -- and the asset type is what tells them
-        apart. See ADR 0005.
-        """
+        """Which body of data these bars join once at rest."""
         return (
             Dataset.CONTINUOUS
             if self.asset_type is AssetType.FUTURES
@@ -98,12 +88,7 @@ class DelistedRequest:
 
     @property
     def kind(self) -> Literal["archive", "update"]:
-        """Which half of the delisted dataset the selector names.
-
-        The wire parameter name and the store's path segment are the same
-        decision (ADR 0003's XOR, resolved), so it is made once here rather than
-        by an ``isinstance`` in each of them that could drift apart.
-        """
+        """Which half of the delisted dataset the selector names."""
         return "archive" if isinstance(self.selector, DelistedArchive) else "update"
 
     def to_params(self) -> dict[str, str]:
@@ -152,25 +137,33 @@ class MetafileRequest:
         }
 
 
-# every request whose archive the store keeps, which is every request except none
+type AnyBarsRequest = BarsRequest[EquitiesAdjustment | ContinuousFuturesAdjustment]
+
+# every request whose archive the store keeps
 type StoredRequest = (
-    BarsRequest[EquitiesAdjustment]
-    | BarsRequest[ContinuousFuturesAdjustment]
-    | BarsRequest[EquitiesAdjustment | ContinuousFuturesAdjustment]
-    | DelistedRequest
-    | ContractsRequest
-    | MetafileRequest
+    AnyBarsRequest | DelistedRequest | ContractsRequest | MetafileRequest
 )
 
 
 def request_from_params(endpoint: str, params: Mapping[str, str]) -> StoredRequest:
-    """Rebuild the request that produced a raw directory, from its sidecar.
+    """Rebuild the request recorded in a snapshot record.
 
-    ``sync()`` needs the request, not the path. Which dataset, adjustment and
-    timeframe a directory of ``.txt`` files belongs to is a fact the download
-    already knew and wrote down; re-deriving it by regexing the path back apart
-    would be a second copy of the layout, free to drift from the one in
-    ``Catalog``. See ADR 0005.
+    Parameters
+    ----------
+    endpoint : str
+        The endpoint the original request was sent to.
+    params : Mapping[str, str]
+        The query parameters the original request carried.
+
+    Returns
+    -------
+    StoredRequest
+        The request that produced the snapshot.
+
+    Raises
+    ------
+    ValueError
+        If `endpoint` names no known request type.
     """
     match endpoint:
         case BarsRequest.endpoint:
@@ -209,6 +202,4 @@ def request_from_params(endpoint: str, params: Mapping[str, str]) -> StoredReque
                 AssetType(params["type"]), MetaDataType(params["metafile_type"])
             )
         case _:
-            raise ValueError(
-                f"sidecar names an endpoint the store cannot read: {endpoint!r}"
-            )
+            raise ValueError(f"snapshot record names an unknown endpoint: {endpoint!r}")
