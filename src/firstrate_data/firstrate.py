@@ -1,5 +1,6 @@
 import os
 from abc import ABC, abstractmethod
+from datetime import date
 from pathlib import Path
 from typing import ClassVar, Self
 
@@ -90,6 +91,17 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
     # helpers
     # ------------------------------------------------------------------
 
+    def _fetched_on(self) -> date:
+        """The vintage the download about to happen will carry.
+
+        The loader is where the store learns *when*, because it is the only layer
+        that knows a fetch is happening at all. It is not a field of the request:
+        a request is the parameters identifying a slice of the dataset, and when
+        we asked identifies neither a slice nor the dataset -- so the request
+        stays exactly the wire contract. See ADR 0005.
+        """
+        return date.today()
+
     # Transport / persistence ------------------------------------------
 
     def _get(self, request: Request) -> bytes:
@@ -129,7 +141,7 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         """
         zip_file = self._get(request)
 
-        return self._catalog.write_raw_bars(zip_file, request)
+        return self._catalog.write_raw_bars(zip_file, request, self._fetched_on())
 
     # Meta File Requests -----------------------------------------------
 
@@ -141,4 +153,4 @@ class FirstRateData[AdjustmentT: EquitiesAdjustment | ContinuousFuturesAdjustmen
         """
         content = self._get(request)
 
-        return self._catalog.write_raw_metadata(content, request)
+        return self._catalog.write_raw_metadata(content, request, self._fetched_on())

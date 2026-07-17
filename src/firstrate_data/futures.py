@@ -80,7 +80,7 @@ class FirstRateFutures(FirstRateData[ContinuousFuturesAdjustment]):
         request = ContractsRequest(contract_files, timeframe)
         zip_file = self._get(request)
 
-        return self._catalog.write_raw_contracts(zip_file, request)
+        return self._catalog.write_raw_contracts(zip_file, request, self._fetched_on())
 
     def download_continuous_audit(self) -> Path:
         """This function returns the individual futures contracts used in constructing the continuous data series."""

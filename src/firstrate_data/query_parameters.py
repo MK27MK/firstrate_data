@@ -31,16 +31,57 @@ class MetaDataType(StrEnum):
     CONTIN_AUDIT = "contin_audit"
 
 
+class Dataset(StrEnum):
+    """Which body of data within an asset type a bar belongs to, once it is at rest.
+
+    A key of the store rather than a filter over it: the plain query spans every
+    dataset, so the unbiased question is the one you ask by default and
+    survivorship is what you have to opt into. It sits at a fixed level of the
+    tree because the depth must be uniform -- a glob mixing a stock tree that has
+    this key with a futures tree that does not fails to bind. See ADR 0005.
+    """
+
+    LISTED = auto()
+    DELISTED = auto()
+    CONTINUOUS = auto()
+    CONTRACT = auto()
+
+
 class EquitiesAdjustment(StrEnum):
     SPLIT = "adj_split"
     SPLIT_AND_DIVIDEND = "adj_splitdiv"
     UNADJUSTED = "UNADJUSTED"
+
+    @property
+    def is_restated(self) -> bool:
+        """Whether the vendor rewrites this series' past when an action lands.
+
+        An adjusted price is computed as of a date: every split or dividend
+        rescales all the bars before it, so two vintages of the same series sit
+        on different bases and joining them end-to-end splices in a price move
+        that never happened. Unadjusted prices have no basis -- nothing restates
+        them -- which is why they are the only ones an increment can extend.
+        See ADR 0005.
+        """
+        return self is not EquitiesAdjustment.UNADJUSTED
 
 
 class ContinuousFuturesAdjustment(StrEnum):
     RATIO = "contin_adj_ratio"
     ABSOLUTE = "contin_adj_absolute"
     UNADJUSTED = "contin_UNadj"
+
+    @property
+    def is_restated(self) -> bool:
+        """Whether the vendor rewrites this series' past when a roll lands.
+
+        The same property the equities adjustments have, arrived at by a
+        different mechanism: a ratio- or absolute-adjusted continuous series
+        exists to erase roll jumps, so each new roll rescales or shifts the
+        history behind it exactly as a split does. ``contin_UNadj`` is raw trade
+        data and is not restated. See ADR 0005.
+        """
+        return self is not ContinuousFuturesAdjustment.UNADJUSTED
 
 
 class ContractFiles(StrEnum):

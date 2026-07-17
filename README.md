@@ -81,17 +81,63 @@ futures.download_contracts(ContractFiles.UPDATE, Timeframe.MIN_1)
 futures.download_continuous_audit()
 ```
 
-Each call returns the `Path` it wrote and replaces whatever was there before.
+Each call returns the `Path` it wrote. Every download lands under the date it was
+fetched — its **vintage** — because the vendor's answer to an unchanged question
+changes over time, and a store that overwrites cannot tell you that it did.
 
 ```
-DATA_PATH/raw/{asset}/{period}/{timeframe}/{adjustment}[/{ticker_range}]   bars
-DATA_PATH/raw/{asset}/meta/{metafile}/             splits, dividends, contin_audit
-DATA_PATH/raw/futures/contracts/{archive|update}/{timeframe}/   individual contracts
-DATA_PATH/raw/stock/delisted/{archive|update}/{selector}/{timeframe}/{adjustment}
+DATA_PATH/raw/{asset}/{period}/{timeframe}/{adjustment}[/{ticker_range}]/{vintage}/
+DATA_PATH/raw/{asset}/meta/{metafile}/{vintage}/         splits, dividends, contin_audit
+DATA_PATH/raw/futures/contracts/{archive|update}/{timeframe}/{vintage}/
+DATA_PATH/raw/stock/delisted/{archive|update}/{selector}/{timeframe}/{adjustment}/{vintage}/
 ```
+
+Each vintage directory carries a `_vintage.json` sidecar recording the request that
+produced it. Retention is one number: one date for a `full`, every date for the
+increments — a `full` wholly contains the one before it, and a week of 1min bars is a
+rounding error.
 
 Archives are unzipped to the side and swapped in whole, so a folder either holds one
 complete archive or does not exist — a Ctrl-C mid-unzip never leaves a truncated one.
+
+## Querying
+
+`raw/` is the truth. The queryable side is Hive-partitioned Parquet derived from it:
+`rm -rf` it and `sync()` rebuilds it with no network.
+
+```python
+from firstrate_data.catalog import Catalog
+from firstrate_data.query_parameters import Dataset, EquitiesAdjustment, Timeframe
+
+catalog = Catalog.from_env()
+catalog.sync()  # raw/ -> parquet. Idempotent: also the rebuild, also the Ctrl-C cure.
+
+# a lazy DuckDB relation, not rows -- 400GB does not fit in a list
+bars = catalog.stock_bars(Timeframe.DAY_1, EquitiesAdjustment.SPLIT, ticker="AAPL")
+bars.aggregate("avg(close)").show()
+
+# delisted tickers are in by default: the plain question is the unbiased one,
+# and asking for `Dataset.LISTED` is what costs you survivorship
+listed_only = catalog.stock_bars(
+    Timeframe.DAY_1, EquitiesAdjustment.SPLIT, dataset=Dataset.LISTED
+)
+```
+
+The selectors **build the glob** rather than filter it: at 3000 partitions a fine slice
+costs 291ms through a wide glob with a `WHERE` and 0.3ms through a narrow one, and this
+tree will hold ~150k leaves.
+
+The asset type is in the method name (`stock_bars` / `futures_bars`), so pairing futures
+with an equities adjustment is unrepresentable rather than merely wrong — on the read
+side that pairing has no server to reject it, and would just return nothing.
+
+Vintages are **replaced, never merged**. Adjusted prices are not append-only: every
+corporate action rewrites the history before it, so a newer `full` replaces an older one
+rather than extending it, and `sync()` refuses to append an increment to an adjusted
+series (it reports the refusal; re-fetch `period=full`). Unadjusted series have no
+adjustment basis and are extended in place, minus whatever the partition already covers.
+
+See `docs/adr/0005-hive-parquet-read-side-and-vintage-reconciliation.md`.
 
 ## Progress
 
