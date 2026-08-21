@@ -1,0 +1,40 @@
+# all rules: https://docs.astral.sh/ruff/rules/#rules
+# default rules: https://docs.astral.sh/ruff/default-rules/
+
+[lint]
+select = ["ALL"]
+# extend-select is currently redundant since im already using ALL
+# im keeping it to store rules I like and want to keep when I will remove ALL.
+extend-select = [ 
+    "C901",
+    "TRY003", # https://docs.astral.sh/ruff/rules/raise-vanilla-args/ encourages good exception writing.
+    "D401", # non-imperative-mood (docstrings)
+]
+
+# ruff check --select D --ignore D100,D101,D102,D103,D104,D105,D107,D203,D213
+ignore = [
+    "D100", # Missing docstring in public module
+    "D101", # Missing docstring in public class
+    "D102", # Missing docstring in public method
+    "D103", # Missing docstring in public function
+    "D104", # Missing docstring in public package
+    "D105", # Missing docstring in magic method
+    "D107", # Missing docstring in __init__
+    "D203", # incorrect-blank-line-before-class (we dont want a blank line before a class docstring) it also conflicts with D211
+    "D213", # multi-line-summary-second-line conflicts with D212, which we decided to follow.
+
+    "CPY001", # Missing copyright notice at top of file
+    "COM812", # missing-trailing-comma https://docs.astral.sh/ruff/rules/missing-trailing-comma/#formatter-compatibility
+]
+
+[lint.mccabe]
+max-complexity = 5
+
+[lint.per-file-ignores]
+"src/firstrate_data/scripts/*" = ["T201"] # scripts print reports to the terminal by design
+"src/firstrate_data/store/_deflate64.py" = ["SLF001"] # patches zipfile's private API: no public seam exists
+"tests/*" = [
+    "S101", # assert - we need assertions in tests
+    "SLF001", # private-member-access https://docs.astral.sh/ruff/rules/private-member-access/
+    "PLR2004" # magic-value-comparison
+]

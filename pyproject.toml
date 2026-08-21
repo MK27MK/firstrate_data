@@ -1,0 +1,42 @@
+[project]
+name = "firstrate-data"
+version = "0.1.0"
+description = "Download FirstRate Data market data into a partitioned DuckDB-backed Parquet store."
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "duckdb>=1.5.4",
+    # the vendor's larger archives are Deflate64, which CPython's zipfile
+    # declines to decode -- see firstrate_data/_deflate64.py
+    "inflate64>=1.0.4",
+    "python-dotenv>=1.2.2",
+    "pytz>=2026.2",
+    "requests>=2.34.2",
+    "tqdm>=4.67.1",
+    # requests already vendors it, but the transport configures Retry itself, so
+    # it is a direct dependency here rather than one we borrow
+    "urllib3>=2.0",
+]
+
+[project.scripts]
+firstrate = "firstrate_data.scripts.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+# src too, so the Examples blocks are executed rather than decorative
+testpaths = ["tests", "src"]
+addopts = "--doctest-modules"
+
+# uv add --dev <dep>
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+    "numpy>=2.5.1",
+    "pandas>=3.0.5",
+    "pytest>=9.1.1",
+    "ruff>=0.16.3",
+    "vale>=3.17.1.0",
+]

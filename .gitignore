@@ -1,0 +1,26 @@
+__pycache__/
+*.egg-info/
+.venv/
+.DS_Store
+._*
+.pytest_cache/
+
+# agents
+CLAUDE.md
+.claude/
+CONTEXT.md
+docs/*
+# !docs/glossary/
+**/GLOSSARY.md
+
+# venv
+.env
+.env.*
+!.env.example
+
+# vale
+vale_styles/
+.vale.ini
+
+# pre-commit (not configured it yet)
+.pre-commit-config.yaml
