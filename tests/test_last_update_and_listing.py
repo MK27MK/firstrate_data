@@ -15,7 +15,7 @@ from datetime import date, datetime
 
 import pytest
 
-from firstrate_data.domain import TickerListing
+from firstrate_data.domain import AssetType, Dataset, TickerListing
 from firstrate_data.download.client.client import Client
 from firstrate_data.download.client.futures import FuturesClient
 from firstrate_data.download.client.index import IndexClient
@@ -101,18 +101,26 @@ class TestTickerListing:
         listed = index.download_ticker_listing()
 
         assert listed == [
-            TickerListing("SPX", "S&P 500 Index", date(2005, 1, 3), date(2026, 7, 31)),
+            TickerListing(
+                "SPX",
+                "S&P 500 Index",
+                date(2005, 1, 3),
+                date(2026, 7, 31),
+                Dataset.LISTED,
+            ),
             TickerListing(
                 "NDX",
                 "Nasdaq 100 Index",
                 date(2005, 1, 3),
                 date(2026, 7, 30),
+                Dataset.LISTED,
             ),
             TickerListing(
                 "DJI",
                 "Dow Jones Industrial Average",
                 date(1999, 1, 4),
                 date(2026, 7, 31),
+                Dataset.LISTED,
             ),
         ]
 
@@ -135,6 +143,7 @@ class TestTickerListing:
         """
         listed = TickerListing.from_csv(
             "SPXT,S&P 500, Total Return,2005-01-03,2026-07-31",
+            AssetType.INDEX,
         )
 
         assert listed == [
@@ -143,8 +152,86 @@ class TestTickerListing:
                 "S&P 500, Total Return",
                 date(2005, 1, 3),
                 date(2026, 7, 31),
+                Dataset.LISTED,
             ),
         ]
+
+    def test_a_delisted_row_names_its_dataset_and_keeps_the_bare_symbol(self) -> None:
+        """The suffix is the only mark the vendor puts on a delisted row.
+
+        The store's tree is keyed by the symbol without it.
+
+        """
+        listed = TickerListing.from_csv(
+            "ACTU-DELISTED,Actuate Corp,2000-01-03,2010-11-02\n",
+            AssetType.STOCK,
+        )
+
+        assert listed == [
+            TickerListing(
+                "ACTU",
+                "Actuate Corp",
+                date(2000, 1, 3),
+                date(2010, 11, 2),
+                Dataset.DELISTED,
+            ),
+        ]
+
+    def test_one_symbol_on_both_sides_comes_back_as_two_rows(self) -> None:
+        """A symbol outlives the company behind it.
+
+        The listing states it twice, and only the dataset tells the two apart.
+
+        """
+        listed = TickerListing.from_csv(
+            "ACTU,Actuate Therapeutics,2024-08-13,2026-08-25\n"
+            "ACTU-DELISTED,Actuate Corp,2000-01-03,2010-11-02\n",
+            AssetType.STOCK,
+        )
+
+        assert [(one.ticker, one.dataset, one.full_name) for one in listed] == [
+            ("ACTU", Dataset.LISTED, "Actuate Therapeutics"),
+            ("ACTU", Dataset.DELISTED, "Actuate Corp"),
+        ]
+
+    def test_a_dash_inside_a_symbol_survives(self) -> None:
+        listed = TickerListing.from_csv(
+            "AA.B-DELISTED,,2014-09-24,2016-10-31\nBRK-B,Berkshire,1996-05-09,2026-08-25\n",
+            AssetType.STOCK,
+        )
+
+        assert [(one.ticker, one.dataset) for one in listed] == [
+            ("AA.B", Dataset.DELISTED),
+            ("BRK-B", Dataset.LISTED),
+        ]
+
+    def test_an_unmarked_futures_row_is_the_continuous_series(self) -> None:
+        """Only stocks have a delisted endpoint.
+
+        An unmarked row says the asset type's ordinary dataset, which for
+        futures is not the listed one.
+
+        """
+        listed = TickerListing.from_csv(
+            "ES,E-Mini S&P 500,1997-09-09,2026-08-25\n",
+            AssetType.FUTURES,
+        )
+
+        assert listed[0].dataset is Dataset.CONTINUOUS
+
+    def test_the_name_is_kept_as_served_when_the_vendor_leaves_it_empty(self) -> None:
+        """A quarter of the delisted rows carry no name.
+
+        An empty one is a fact about the vendor's coverage, not a row to refuse.
+
+        """
+        listed = TickerListing.from_csv(
+            "AABA-DELISTED,,2007-04-27,2019-10-02\n",
+            AssetType.STOCK,
+        )
+
+        assert listed[0].full_name == ""
+        assert listed[0].ticker == "AABA"
 
 
 class TestEveryAssetTypeHasThem:
@@ -195,17 +282,21 @@ class TestAJunkBodyIsRefusedRatherThanBelieved:
 
     def test_an_empty_listing(self) -> None:
         with pytest.raises(ValueError, match="no rows"):
-            TickerListing.from_csv("\n\n")
+            TickerListing.from_csv("\n\n", AssetType.INDEX)
 
     def test_a_row_short_of_its_fields(self) -> None:
         with pytest.raises(ValueError, match="startDate"):
-            TickerListing.from_csv("SPX,S&P 500 Index,2005-01-03\n")
+            TickerListing.from_csv("SPX,S&P 500 Index,2005-01-03\n", AssetType.INDEX)
 
     def test_a_row_whose_dates_are_not_dates(self) -> None:
         with pytest.raises(ValueError, match="where a date belongs"):
-            TickerListing.from_csv("SPX,S&P 500 Index,2005-01-03,ongoing\n")
+            TickerListing.from_csv(
+                "SPX,S&P 500 Index,2005-01-03,ongoing\n", AssetType.INDEX
+            )
 
     def test_a_page_where_a_listing_belongs(self) -> None:
         """An error page is CSV too, as far as a splitter is concerned."""
         with pytest.raises(ValueError, match="startDate"):
-            TickerListing.from_csv("<html><body>Invalid userid</body></html>")
+            TickerListing.from_csv(
+                "<html><body>Invalid userid</body></html>", AssetType.INDEX
+            )
