@@ -116,8 +116,17 @@ return a value, and write nothing to the store:
 
 ```python
 stocks.download_last_update()  # date, or datetime when the vendor states a time
-stocks.download_ticker_listing()  # [TickerListing(ticker, name, start_date, end_date)]
+stocks.download_ticker_listing()
+# [TickerListing(ticker, name, start_date, end_date, dataset)]
 ```
+
+The vendor marks a delisted listing row by suffixing its ticker,
+`ACTU-DELISTED`, and marks a live one not at all. `TickerListing.ticker` is the
+bare symbol and `dataset` says which half the row belongs to, so a symbol that
+outlived the company behind it comes back as two rows, `Dataset.LISTED` and
+`Dataset.DELISTED`. Only stocks have a delisted endpoint; an unsuffixed row is
+whatever its asset type ordinarily serves, which for futures is
+`Dataset.CONTINUOUS`.
 
 ## The store
 

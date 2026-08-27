@@ -190,6 +190,7 @@ class Client(ABC):
         """
         return TickerListing.from_csv(
             self._fetcher.read(TickerListingRequest(self._asset_type)),
+            self._asset_type,
         )
 
     def close(self) -> None:

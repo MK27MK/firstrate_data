@@ -27,6 +27,13 @@ class Dataset(StrEnum):
     CONTINUOUS = auto()
     CONTRACT = auto()
 
+    @classmethod
+    def default_from_asset_type(cls, asset_type: AssetType) -> "Dataset":
+        return cls.CONTINUOUS if asset_type is AssetType.FUTURES else cls.LISTED
+
+
+DELISTED_SUFFIX = "-DELISTED"
+
 
 # adjustments ----------------------------------------------------------
 
@@ -193,10 +200,14 @@ class TickerListing:
     full_name: str
     start_date: date
     end_date: date
+    dataset: Dataset
 
     @classmethod
-    def from_csv(cls, body: str) -> list[Self]:
+    def from_csv(cls, body: str, asset_type: AssetType) -> list[Self]:
         r"""Parse the rows a ``ticker_listing`` response body carries, one per line.
+
+        The listing is scoped by the ``type`` the request sent, and a row states
+        no asset type of its own, so `asset_type` names what the rows describe.
 
         Raises
         ------
@@ -206,23 +217,27 @@ class TickerListing:
 
         Examples
         --------
-        >>> listed = TickerListing.from_csv("SPX,S&P 500,2005-01-03,2026-07-31\n")
-        >>> listed[0].ticker, listed[0].full_name
-        ('SPX', 'S&P 500')
+        >>> listed = TickerListing.from_csv(
+        ...     "SPX,S&P 500,2005-01-03,2026-07-31\n", AssetType.INDEX
+        ... )
+        >>> listed[0].ticker, listed[0].full_name, listed[0].dataset
+        ('SPX', 'S&P 500', <Dataset.LISTED: 'listed'>)
 
         """
         listed = [
-            cls._from_row(row) for row in csv.reader(body.splitlines()) if any(row)
+            cls._from_row(row, asset_type)
+            for row in csv.reader(body.splitlines())
+            if any(row)
         ]
         if not listed:
-            msg = f"ticker_listing answered with no rows: {_excerpt(body)}"
+            msg = f"ticker_listing answered with no rows: {cls._excerpt(body)}"
             raise ValueError(msg)
         return listed
 
     _ROW_FIELDS = 4
 
     @classmethod
-    def _from_row(cls, row: list[str]) -> Self:
+    def _from_row(cls, row: list[str], asset_type: AssetType) -> Self:
         if len(row) < cls._ROW_FIELDS:
             msg = (
                 f"ticker_listing row {','.join(row)!r} is not "
@@ -236,14 +251,53 @@ class TickerListing:
         # ("Dow Jones Industrial Average, Total Return") splits into extra fields.
         # Those fields belong to the name.
         ticker, *named, start, end = row
+        symbol, dataset = cls._delisting_of(ticker.strip(), asset_type)
         # strip the name whole rather than field by field: the space after the
         # comma in "S&P 500, Total Return" belongs to the name
         return cls(
-            ticker.strip(),
+            symbol,
             ",".join(named).strip(),
-            _listed_date(start.strip(), row),
-            _listed_date(end.strip(), row),
+            cls._listed_date(start.strip(), row),
+            cls._listed_date(end.strip(), row),
+            dataset,
         )
+
+    @staticmethod
+    def _delisting_of(ticker: str, asset_type: AssetType) -> tuple[str, Dataset]:
+        """Split a listing's ticker into the bare symbol and the dataset holding it.
+
+        Only a delisted row is marked, so an unmarked one says nothing beyond
+        belonging to whatever its asset type ordinarily serves.
+        """
+        if ticker.endswith(DELISTED_SUFFIX):
+            return ticker.removesuffix(DELISTED_SUFFIX), Dataset.DELISTED
+        return ticker, Dataset.default_from_asset_type(asset_type)
+
+    @staticmethod
+    def _listed_date(field: str, row: list[str]) -> date:
+        try:
+            return date.fromisoformat(field)
+        except ValueError as unreadable:
+            msg = (
+                f"ticker_listing row {','.join(row)!r} carries {field!r} "
+                "where a date belongs"
+            )
+            raise ValueError(
+                msg,
+            ) from unreadable
+
+    @staticmethod
+    def _excerpt(body: str) -> str:
+        """Return the head of a body, for an error that has to quote what arrived.
+
+        An unparseable body is as likely to be an HTML error page as a stray
+        character, and a message carrying the whole page is a message nobody reads.
+        """
+        excerpt_length = 120
+        arrived = body.strip()
+        if len(arrived) > excerpt_length:
+            return f"{arrived[:excerpt_length]!r}..."
+        return repr(arrived)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,31 +341,3 @@ class BarType:
     @classmethod
     def fields(cls) -> list[str]:
         return [f.name for f in fields(cls)]
-
-
-def _listed_date(field: str, row: list[str]) -> date:
-    try:
-        return date.fromisoformat(field)
-    except ValueError as unreadable:
-        msg = (
-            f"ticker_listing row {','.join(row)!r} carries {field!r} "
-            "where a date belongs"
-        )
-        raise ValueError(
-            msg,
-        ) from unreadable
-
-
-_EXCERPT_LENGTH = 120
-
-
-def _excerpt(body: str) -> str:
-    """Return the head of a body, for an error that has to quote what arrived.
-
-    An unparseable body is as likely to be an HTML error page as a stray
-    character, and a message carrying the whole page is a message nobody reads.
-    """
-    arrived = body.strip()
-    if len(arrived) > _EXCERPT_LENGTH:
-        return f"{arrived[:_EXCERPT_LENGTH]!r}..."
-    return repr(arrived)
