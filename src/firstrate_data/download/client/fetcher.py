@@ -403,7 +403,7 @@ class ArchiveFetcher:
 
         return keep, total, fingerprint
 
-    def _stream_body(  # noqa: PLR0913, PLR0917 - each argument is a distinct input to the copy.
+    def _stream_body(  # noqa: PLR0913 - each argument is a distinct input to the copy.
         self,
         response: requests.Response,
         partial: Path,
