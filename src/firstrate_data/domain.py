@@ -28,6 +28,21 @@ class Dataset(StrEnum):
     CONTRACT = auto()
 
 
+# the vendor marks a delisted ticker_listing row by suffixing its ticker, and
+# marks a live one not at all
+DELISTED_SUFFIX = "-DELISTED"
+
+
+def dataset_of(asset_type: AssetType) -> Dataset:
+    """Which dataset an asset type's ordinary bars are filed under.
+
+    Futures arrive as a continuous series; every other asset type arrives as
+    what trades today. A delisted or contract dataset is asked for by name, so
+    no asset type falls into one by default.
+    """
+    return Dataset.CONTINUOUS if asset_type is AssetType.FUTURES else Dataset.LISTED
+
+
 # adjustments ----------------------------------------------------------
 
 
@@ -193,10 +208,14 @@ class TickerListing:
     full_name: str
     start_date: date
     end_date: date
+    dataset: Dataset
 
     @classmethod
-    def from_csv(cls, body: str) -> list[Self]:
+    def from_csv(cls, body: str, asset_type: AssetType) -> list[Self]:
         r"""Parse the rows a ``ticker_listing`` response body carries, one per line.
+
+        The listing is scoped by the ``type`` the request sent, and a row states
+        no asset type of its own, so `asset_type` names what the rows describe.
 
         Raises
         ------
@@ -206,13 +225,17 @@ class TickerListing:
 
         Examples
         --------
-        >>> listed = TickerListing.from_csv("SPX,S&P 500,2005-01-03,2026-07-31\n")
-        >>> listed[0].ticker, listed[0].full_name
-        ('SPX', 'S&P 500')
+        >>> listed = TickerListing.from_csv(
+        ...     "SPX,S&P 500,2005-01-03,2026-07-31\n", AssetType.INDEX
+        ... )
+        >>> listed[0].ticker, listed[0].full_name, listed[0].dataset
+        ('SPX', 'S&P 500', <Dataset.LISTED: 'listed'>)
 
         """
         listed = [
-            cls._from_row(row) for row in csv.reader(body.splitlines()) if any(row)
+            cls._from_row(row, asset_type)
+            for row in csv.reader(body.splitlines())
+            if any(row)
         ]
         if not listed:
             msg = f"ticker_listing answered with no rows: {_excerpt(body)}"
@@ -222,7 +245,7 @@ class TickerListing:
     _ROW_FIELDS = 4
 
     @classmethod
-    def _from_row(cls, row: list[str]) -> Self:
+    def _from_row(cls, row: list[str], asset_type: AssetType) -> Self:
         if len(row) < cls._ROW_FIELDS:
             msg = (
                 f"ticker_listing row {','.join(row)!r} is not "
@@ -236,13 +259,15 @@ class TickerListing:
         # ("Dow Jones Industrial Average, Total Return") splits into extra fields.
         # Those fields belong to the name.
         ticker, *named, start, end = row
+        symbol, dataset = _delisting_of(ticker.strip(), asset_type)
         # strip the name whole rather than field by field: the space after the
         # comma in "S&P 500, Total Return" belongs to the name
         return cls(
-            ticker.strip(),
+            symbol,
             ",".join(named).strip(),
             _listed_date(start.strip(), row),
             _listed_date(end.strip(), row),
+            dataset,
         )
 
 
@@ -287,6 +312,17 @@ class BarType:
     @classmethod
     def fields(cls) -> list[str]:
         return [f.name for f in fields(cls)]
+
+
+def _delisting_of(ticker: str, asset_type: AssetType) -> tuple[str, Dataset]:
+    """Split a listing's ticker into the bare symbol and the dataset holding it.
+
+    Only a delisted row is marked, so an unmarked one says nothing beyond
+    belonging to whatever its asset type ordinarily serves.
+    """
+    if ticker.endswith(DELISTED_SUFFIX):
+        return ticker.removesuffix(DELISTED_SUFFIX), Dataset.DELISTED
+    return ticker, dataset_of(asset_type)
 
 
 def _listed_date(field: str, row: list[str]) -> date:

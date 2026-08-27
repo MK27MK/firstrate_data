@@ -14,6 +14,7 @@ from firstrate_data.domain import (
     MetafileType,
     Period,
     Timeframe,
+    dataset_of,
 )
 
 
@@ -57,9 +58,7 @@ class BarsRequest:
     # fourth asset type. No path can send an unconstructible request.
     def __post_init__(self) -> None:
         asset_type = self._stated(self.bar_type.asset_type, "asset type")
-        self._file_under(
-            Dataset.CONTINUOUS if asset_type is AssetType.FUTURES else Dataset.LISTED,
-        )
+        self._file_under(dataset_of(asset_type))
         self._stated(self.period, "period")
 
         if asset_type in EQUITIES:
