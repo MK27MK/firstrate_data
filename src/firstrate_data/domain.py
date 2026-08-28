@@ -20,8 +20,6 @@ EQUITIES = (AssetType.STOCK, AssetType.ETF)
 
 
 class Dataset(StrEnum):
-    """Which body of data within an asset type a bar belongs to, once at rest."""
-
     LISTED = auto()
     DELISTED = auto()
     CONTINUOUS = auto()
@@ -30,9 +28,6 @@ class Dataset(StrEnum):
     @classmethod
     def default_from_asset_type(cls, asset_type: AssetType) -> "Dataset":
         return cls.CONTINUOUS if asset_type is AssetType.FUTURES else cls.LISTED
-
-
-DELISTED_SUFFIX = "-DELISTED"
 
 
 # adjustments ----------------------------------------------------------
@@ -196,48 +191,36 @@ class DelistedUpdate(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class TickerListing:
+    # example structure of a ticker listing file: https://firstratedata.com/api_ticker_files/etf_ticker_dates_listing.txt
+    # Ticker,Name,First Date,Last Date
+    # AAA,Listed Funds Trust Aaf First Priority Clo Bond ETF,2020-09-09,2026-08-26
     ticker: str
     full_name: str
     start_date: date
     end_date: date
-    dataset: Dataset
 
     @classmethod
-    def from_csv(cls, body: str, asset_type: AssetType) -> list[Self]:
-        r"""Parse the rows a ``ticker_listing`` response body carries, one per line.
-
-        The listing is scoped by the ``type`` the request sent, and a row states
-        no asset type of its own, so `asset_type` names what the rows describe.
-
-        Raises
-        ------
-        ValueError
-            If the body holds no rows, or if a row is short of its four
-            fields or lacks two dates.
-
-        Examples
-        --------
-        >>> listed = TickerListing.from_csv(
-        ...     "SPX,S&P 500,2005-01-03,2026-07-31\n", AssetType.INDEX
-        ... )
-        >>> listed[0].ticker, listed[0].full_name, listed[0].dataset
-        ('SPX', 'S&P 500', <Dataset.LISTED: 'listed'>)
-
-        """
-        listed = [
-            cls._from_row(row, asset_type)
-            for row in csv.reader(body.splitlines())
-            if any(row)
+    def from_csv(cls, csv_body: str) -> list[Self]:
+        # get one TickerListing for each row of file_body
+        listed_tickers = [
+            cls._from_row(row) for row in csv.reader(csv_body.splitlines()) if any(row)
         ]
-        if not listed:
-            msg = f"ticker_listing answered with no rows: {cls._excerpt(body)}"
+        if not listed_tickers:
+            msg = f"ticker_listing answered with no rows: {cls._excerpt(csv_body)}"
             raise ValueError(msg)
-        return listed
+        return listed_tickers
+
+    def is_delisted(self) -> bool:
+        return self.ticker.endswith("-DELISTED")
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
 
     _ROW_FIELDS = 4
 
     @classmethod
-    def _from_row(cls, row: list[str], asset_type: AssetType) -> Self:
+    def _from_row(cls, row: list[str]) -> Self:
         if len(row) < cls._ROW_FIELDS:
             msg = (
                 f"ticker_listing row {','.join(row)!r} is not "
@@ -250,28 +233,15 @@ class TickerListing:
         # from both ends rather than by position: an unquoted comma in a name
         # ("Dow Jones Industrial Average, Total Return") splits into extra fields.
         # Those fields belong to the name.
-        ticker, *named, start, end = row
-        symbol, dataset = cls._delisting_of(ticker.strip(), asset_type)
+        ticker, *full_name, start_date, end_date = row
         # strip the name whole rather than field by field: the space after the
         # comma in "S&P 500, Total Return" belongs to the name
         return cls(
-            symbol,
-            ",".join(named).strip(),
-            cls._listed_date(start.strip(), row),
-            cls._listed_date(end.strip(), row),
-            dataset,
+            ticker,
+            ",".join(full_name).strip(),
+            cls._listed_date(start_date.strip(), row),
+            cls._listed_date(end_date.strip(), row),
         )
-
-    @staticmethod
-    def _delisting_of(ticker: str, asset_type: AssetType) -> tuple[str, Dataset]:
-        """Split a listing's ticker into the bare symbol and the dataset holding it.
-
-        Only a delisted row is marked, so an unmarked one says nothing beyond
-        belonging to whatever its asset type ordinarily serves.
-        """
-        if ticker.endswith(DELISTED_SUFFIX):
-            return ticker.removesuffix(DELISTED_SUFFIX), Dataset.DELISTED
-        return ticker, Dataset.default_from_asset_type(asset_type)
 
     @staticmethod
     def _listed_date(field: str, row: list[str]) -> date:
@@ -302,14 +272,7 @@ class TickerListing:
 
 @dataclass(frozen=True, slots=True)
 class BarType:
-    """What locates a bar in the store: every level of the tree that holds it.
-
-    A level left None names nothing, which a read spans and a write refuses.
-    """
-
-    # declaration order is nesting order. These names in this order form the
-    # path holding a bar and the glob every read builds, so only the order
-    # that wrote a store can read it
+    # declared in the same order used as the store's paths.
     asset_type: AssetType | None = None
     dataset: Dataset | None = None
     adjustment: Adjustment | None = None

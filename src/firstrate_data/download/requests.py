@@ -18,12 +18,6 @@ from firstrate_data.domain import (
 
 
 class Request(Protocol):
-    """One request to one endpoint.
-
-    The endpoint is a property of the request type, not an argument the
-    caller supplies, so a request can't reach the wrong address.
-    """
-
     endpoint: ClassVar[str]
 
     def to_params(self) -> dict[str, str]:
@@ -37,18 +31,9 @@ class NotOfferedError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class BarsRequest:
-    """One archive of bars, and where the store files what comes back.
-
-    ``bar_type`` leaves the ticker unnamed: an archive carries many, and each
-    payload names its own. The dataset is this endpoint's to say, so this
-    request states it here, whatever the caller passed.
-
-    ``period`` is None at the endpoints below, which serve their dataset whole.
-    """
-
+    endpoint: ClassVar[str] = "data_file"
     bar_type: BarType
     period: Period | None = None
-    endpoint: ClassVar[str] = "data_file"
     ticker_range: str | None = field(default=None, kw_only=True)
 
     # __post_init__ checks what the vendor will honour, rather than each
@@ -233,16 +218,7 @@ class DelistedBarsRequest(BarsRequest):
 
 @dataclass(frozen=True, slots=True)
 class ContractBarsRequest(BarsRequest):
-    """Bars for individual futures contracts. Futures-only, hence no ``type``.
-
-    The continuous series is a construction. It draws from these contracts,
-    each one a real instrument with its own ticker. They carry no
-    ``adjustment`` and no ``period``: there is no roll inside a single
-    contract to correct for, and each half of the dataset arrives whole.
-    """
-
     endpoint: ClassVar[str] = "futures_contract"
-
     contract_files: ContractFiles = field(kw_only=True)
 
     def __post_init__(self) -> None:
@@ -272,10 +248,7 @@ class ContractBarsRequest(BarsRequest):
 
 @dataclass(frozen=True, slots=True)
 class LastUpdateRequest:
-    """When the vendor last refreshed one asset type's data."""
-
     endpoint: ClassVar[str] = "last_update"
-
     asset_type: AssetType
     is_full_update: bool | None = None
 
@@ -293,10 +266,7 @@ class LastUpdateRequest:
 
 @dataclass(frozen=True, slots=True)
 class TickerListingRequest:
-    """Which tickers one asset type covers, and over what dates."""
-
     endpoint: ClassVar[str] = "ticker_listing"
-
     asset_type: AssetType
 
     def to_params(self) -> dict[str, str]:
@@ -307,10 +277,7 @@ class TickerListingRequest:
 
 @dataclass(frozen=True, slots=True)
 class MetafileRequest:
-    """A per-asset-type metafile: splits, dividends, or the continuous audit."""
-
     endpoint: ClassVar[str] = "meta_file"
-
     asset_type: AssetType
     metafile_type: MetafileType
 
