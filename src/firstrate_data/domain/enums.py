@@ -22,17 +22,10 @@ class AssetType(StrEnum):
 EQUITIES = (AssetType.STOCK, AssetType.ETF)
 
 
-class Dataset(StrEnum):
-    CONTINUOUS = auto()
-    CONTRACT = auto()
-
-
 # adjustments ----------------------------------------------------------
 
 
 class Adjustment(StrEnum):
-    UNADJUSTED = "UNADJUSTED"
-
     @property
     def changes_past(self) -> bool:
         """Return `True` for all adjustments which are not `UNADJUSTED`.
@@ -41,6 +34,10 @@ class Adjustment(StrEnum):
         when a new adjustment comes.
         """
         return self.name != "UNADJUSTED"
+
+
+class Unadjusted(Adjustment):
+    UNADJUSTED = "UNADJUSTED"
 
 
 class EquitiesAdjustment(Adjustment):

@@ -1,9 +1,9 @@
 from firstrate_data.domain import (
-    Adjustment,
     AssetType,
     BarType,
     Period,
     Timeframe,
+    Unadjusted,
 )
 from firstrate_data.download.client.client import Client
 from firstrate_data.download.requests import BarsRequest
@@ -39,7 +39,7 @@ class IndexClient(Client):
         Returns
         -------
         Ingested
-            Tickers seen, rows written, and lines quarantined.
+            Tickers seen and rows written.
 
         """
         # UNADJUSTED is the store's word for it, not the vendor's: the request
@@ -48,7 +48,7 @@ class IndexClient(Client):
             BarType(
                 self._asset_type,
                 timeframe=timeframe,
-                adjustment=Adjustment.UNADJUSTED,
+                adjustment=Unadjusted.UNADJUSTED,
             ),
             period,
         )

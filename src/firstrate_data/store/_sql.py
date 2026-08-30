@@ -75,10 +75,6 @@ BAR_SCHEMA: dict[str, str] = {
 
 OPEN_INTEREST = "open_interest"
 
-# How the ticker reads as a path segment of the tree, wherever BarType puts it
-TICKER_LEVEL = "ticker="
-
-
 # macOS drops these beside the payloads too, where they match ``*.txt``
 SIDECAR_PREFIX = "._"
 
@@ -136,29 +132,37 @@ def sql_list(values: Iterable[str]) -> str:
     return f"[{', '.join(sql_literal(value) for value in values)}]"
 
 
-def ticker_expression(column: str, dataset: Dataset) -> str:
+def ticker_expression(column: str, *, strip_delisted_suffix: bool) -> str:
     """Build the SQL expression extracting a payload filename's ticker in `column`.
 
     The vendor names payloads ``{TICKER}_{period}_{timeframe}_{adjustment}.txt``,
     and the ticker is the one field that never contains an underscore, so this
-    reads from the left. Delisted payloads suffix the ticker
-    (``OLPX-DELISTED_...``). This expression drops the suffix, since
-    ``dataset`` already carries that distinction.
+    reads from the left. The delisted endpoint suffixes the ticker
+    (``OLPX-DELISTED_...``), naming the bundle it served the payload out of
+    rather than the instrument. The store files a stock under its bare symbol
+    whichever bundle carried it, so that suffix comes off here.
     """
     ticker = f"regexp_extract(parse_filename({column}), '^([^_]+)_', 1)"
-    if dataset is Dataset.DELISTED:
+    if strip_delisted_suffix:
         return f"regexp_replace({ticker}, '-DELISTED$', '')"
     return ticker
 
 
-def hive_ticker_expression(column: str) -> str:
+def hive_level_expression(column: str, level: str) -> str:
+    """Build the SQL expression reading one Hive level off a path in `column`.
+
+    NULL where the path carries no such level, which is how a stock's path
+    answers for ``dataset``: the tree carries that level under futures alone.
+    """
     # both separators: DuckDB reports a path on Windows with backslashes, and
     # a level bounded by ``/`` alone would swallow the rest of the path into
-    # the ticker
-    return f"regexp_extract({column}, '{TICKER_LEVEL}([^/\\\\]+)', 1)"
+    # the value.
+    #
+    # ``level`` is one of BarType's own field names, never user input
+    return f"nullif(regexp_extract({column}, '{level}=([^/\\\\]+)', 1), '')"
 
 
-def payload_tickers_select(directory: Path, dataset: Dataset) -> str:
+def payload_tickers_select(directory: Path, *, strip_delisted_suffix: bool) -> str:
     """Build a SELECT of ``(file, ticker)`` for every payload one archive unzipped to.
 
     Via DuckDB's ``glob``, so the filename-to-ticker rule exists once, in
@@ -168,8 +172,9 @@ def payload_tickers_select(directory: Path, dataset: Dataset) -> str:
     # pattern and SIDECAR_PREFIX go through sql_literal(), and
     # ticker_expression() only assembles internal SQL fragments. Neither comes
     # from user input.
+    ticker = ticker_expression("file", strip_delisted_suffix=strip_delisted_suffix)
     return (
-        f"SELECT file, {ticker_expression('file', dataset)} AS ticker "  # noqa: S608
+        f"SELECT file, {ticker} AS ticker "  # noqa: S608
         f"FROM glob({pattern}) "
         # an AppleDouble sidecar matches *.txt and isn't text. The vendor's own
         # archives carry them when the zip came from a Mac
@@ -181,19 +186,27 @@ def bars_select(
     payloads: Iterable[Path],
     bar_type: BarType,
     columns_in_payload: int,
+    *,
+    strip_delisted_suffix: bool,
 ) -> str:
     """Build a SELECT reading unzipped ``.txt`` payloads as the store's schema.
 
     ``ts`` arrives naive in the vendor's clock and leaves tz-aware.
     `bar_type` must leave the ticker unnamed: one file per ticker.
     `columns_in_payload` comes from `payload_columns`.
+
+    Raises
+    ------
+    ValueError
+        If the bar type names no asset type, which is both the zone the
+        stamps are read in and what decides the levels the tree carries.
+
     """
-    asset_type, dataset = bar_type.asset_type, bar_type.dataset
-    # every row's timestamp reflects the zone its asset type trades in, and
-    # its key reflects the ticker rule its dataset uses. A wildcarded level
-    # answers neither.
-    if asset_type is None or dataset is None:
-        msg = "bars need a bar type naming an asset type and a dataset"
+    asset_type = bar_type.asset_type
+    # every row's timestamp reflects the zone its asset type trades in, and a
+    # wildcarded level answers for none of them
+    if asset_type is None:
+        msg = "bars need a bar type naming an asset type"
         raise ValueError(msg)
 
     # the declared columns are positional, so both ends of the schema move with
@@ -217,11 +230,13 @@ def bars_select(
     )
     files = sql_list(str(payload) for payload in payloads)
     stamped = sql_literal(asset_type.timezone())
+    ticker = ticker_expression("filename", strip_delisted_suffix=strip_delisted_suffix)
     # the tree is the only record of these -- they're nowhere in the payload,
     # so a level this stops selecting here would read back as NULL
     levels = ",\n            ".join(
         f"{sql_literal(value)} AS {key}"
-        for key, value in bar_type.to_dict(drop_none=True).items()
+        for key, value in bar_type.path_levels().items()
+        if value is not None
     )
 
     # stamped, levels and files go through sql_literal() and sql_list().
@@ -236,7 +251,7 @@ def bars_select(
             open, high, low, close, {volume},
             {open_interest},
             {levels},
-            {ticker_expression("filename", dataset)} AS ticker
+            {ticker} AS ticker
         FROM read_csv(
             {files},
             header = false,
@@ -362,11 +377,13 @@ def quarantine_filename() -> str:
     return f"{datetime.now(tz=UTC).date().isoformat()}_{uuid4()}"
 
 
-def empty_quarantine_select() -> str:
-    """Build a SELECT with the quarantine's columns and no rows."""
-    columns = ", ".join(
-        f"NULL::{kind} AS {name}" for name, kind in QUARANTINE_SCHEMA.items()
-    )
+def empty_select(schema: dict[str, str]) -> str:
+    """Build a SELECT with `schema`'s columns and no rows.
+
+    What a table the store has never written answers with: a relation of the
+    right shape, so a reader filters and projects it as it would a full one.
+    """
+    columns = ", ".join(f"NULL::{kind} AS {name}" for name, kind in schema.items())
     return f"SELECT {columns} WHERE FALSE"
 
 
@@ -509,11 +526,105 @@ def resample_aggregate(timeframe: Timeframe) -> tuple[str, str]:
     return projection, grouping
 
 
-def bars_projection() -> str:
-    """List the store's columns, in the store's order."""
-    # named rather than ``SELECT *``: Hive partitioning appends the key columns
-    # in alphabetical order, which nothing else in the store agrees with
-    return ", ".join([*BAR_SCHEMA, OPEN_INTEREST, *BarType.fields()])
+def bars_projection(asset_type: AssetType) -> str:
+    """List the store's columns, in the store's order, for a read of `asset_type`.
+
+    Named rather than ``SELECT *``: Hive partitioning appends the key columns
+    in alphabetical order, which nothing else in the store agrees with. A
+    level the tree carries no directory for under this asset type is stated
+    as NULL, so every read answers with the same columns whatever it spans.
+    """
+    filed_under = BarType(asset_type).path_levels()
+    levels = [
+        level if level in filed_under else f"NULL::VARCHAR AS {level}"
+        for level in BarType.fields()
+    ]
+    return ", ".join([*BAR_SCHEMA, OPEN_INTEREST, *levels])
+
+
+def stored_bars_select(paths: Iterable[str], asset_type: AssetType) -> str:
+    """Build a SELECT reading the tree's parquet files as the store's columns.
+
+    One asset type per SELECT: DuckDB refuses a read spanning paths with
+    different Hive levels, and ``dataset`` is a level under futures alone.
+    """
+    # sql_list() escapes every path, and bars_projection() only assembles
+    # internal SQL fragments. Neither comes from user input.
+    return (
+        f"SELECT {bars_projection(asset_type)} "  # noqa: S608
+        f"FROM read_parquet({sql_list(paths)}, hive_partitioning = true)"
+    )
+
+
+def footer_file_spans_select(files: Iterable[str]) -> str:
+    """Build a SELECT of ``(file, first_ts, last_ts, rows)`` read off parquet footers.
+
+    Not ``min(ts)``/``max(ts)`` over the tree: DuckDB fully reads and decodes
+    the column for those, which at this store's shape runs to minutes.
+    ``parquet_metadata`` reads ~10.6 KB per file and scales with file count
+    rather than row count. See
+    ``docs/notes/duckdb/max-of-a-column-is-a-full-scan-not-footer-stats.md``.
+
+    Statistics are the writer's to omit, and a file without them says nothing
+    about its contents: those come back with NULL bounds and a real row count,
+    for the caller to hand to ``scanned_file_spans_select``.
+    """
+    # sql_list() escapes every path, which never comes from user input
+    return f"""
+        SELECT
+            file_name AS file,
+            -- stats_min is VARCHAR ('2010-03-27 07:59:00+00'); the offset
+            -- makes the cast unambiguous, but the cast is mandatory
+            min(stats_min::TIMESTAMPTZ) AS first_ts,
+            max(stats_max::TIMESTAMPTZ) AS last_ts,
+            -- one row per row group per column, so the aggregate is not optional
+            sum(row_group_num_rows)::BIGINT AS rows
+        FROM parquet_metadata({sql_list(files)})
+        WHERE path_in_schema = 'ts'
+        GROUP BY 1
+    """  # noqa: S608
+
+
+def scanned_file_spans_select(files: Iterable[str]) -> str:
+    """Build the same SELECT for files whose footers state no bounds, by reading them.
+
+    No Hive partitioning: this is handed the files the footers could not
+    answer for, which may sit under paths of different depths.
+    """
+    # sql_list() escapes every path, which never comes from user input
+    return f"""
+        SELECT
+            filename AS file,
+            min(ts) AS first_ts,
+            max(ts) AS last_ts,
+            count(*)::BIGINT AS rows
+        FROM read_parquet({sql_list(files)}, filename = true)
+        GROUP BY 1
+    """  # noqa: S608
+
+
+def catalog_rows_select(file_spans: str) -> str:
+    """Build a SELECT turning per-file spans into catalog rows, from the paths alone.
+
+    The bar type a file is filed under is written in its path, so this needs
+    no argument beyond the spans: it reads every level back off ``file`` and
+    groups the files of one ticker into the one row the catalog keeps for it.
+    """
+    levels = ", ".join(
+        f"{hive_level_expression('file', level)} AS {level}"
+        for level in BarType.fields()
+    )
+    # hive_level_expression() only assembles internal SQL fragments, and
+    # `file_spans` is a SELECT this module built
+    return f"""
+        SELECT
+            {levels},
+            min(first_ts) AS first_ts,
+            max(last_ts) AS last_ts,
+            sum(rows)::BIGINT AS rows
+        FROM ({file_spans})
+        GROUP BY ALL
+    """  # noqa: S608
 
 
 def empty_bars_select() -> str:

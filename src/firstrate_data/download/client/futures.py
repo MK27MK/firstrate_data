@@ -54,7 +54,7 @@ class FuturesClient(Client):
         Returns
         -------
         Ingested
-            Tickers seen, rows written, and lines quarantined.
+            Tickers seen and rows written.
 
         Raises
         ------
@@ -94,8 +94,7 @@ class FuturesClient(Client):
         Returns
         -------
         Ingested
-            Tickers seen, rows written, and lines quarantined. The bars land
-            in the ``contract`` dataset, read back with
+            Tickers seen and rows written. The bars are read back with
             ``Store.futures_contract_bars(...)``.
 
         Notes
@@ -116,7 +115,7 @@ class FuturesClient(Client):
         """Ingest the individual contracts that make up the continuous series.
 
         Replaces the ``contin_audit`` table whole. Read it back with
-        ``Store.contin_audit()``.
+        ``Store.contract_dates()``.
         """
         return self._download(
             OtherDataRequest(self._asset_type, OtherData.CONTRACT_DATES),

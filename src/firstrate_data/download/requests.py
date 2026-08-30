@@ -42,7 +42,11 @@ class BarsRequest:
     # fourth asset type. No path can send an unconstructible request.
     def __post_init__(self) -> None:
         asset_type = self._stated(self.bar_type.asset_type, "asset type")
-        self._file_under(Dataset.default_from_asset_type(asset_type))
+        # only futures are filed under a dataset, and this endpoint serves
+        # their continuous series; the individual contracts have their own
+        self._file_under(
+            Dataset.CONTINUOUS if asset_type is AssetType.FUTURES else None,
+        )
         self._stated(self.period, "period")
 
         if asset_type in EQUITIES:
@@ -76,7 +80,7 @@ class BarsRequest:
                 msg,
             )
 
-    def _file_under(self, dataset: Dataset) -> None:
+    def _file_under(self, dataset: Dataset | None) -> None:
         """State the dataset on ``bar_type``, over whatever it arrived with."""
         # the supported way to normalise a field of a frozen dataclass
         object.__setattr__(self, "bar_type", replace(self.bar_type, dataset=dataset))
@@ -130,6 +134,16 @@ class BarsRequest:
             object.__setattr__(self, "ticker_range", letter)
 
     @property
+    def payload_names_carry_delisted_suffix(self) -> bool:
+        """Whether the payload filenames suffix the ticker with ``-DELISTED``.
+
+        Only the delisted endpoint does. The suffix names the bundle the
+        payload came out of rather than the instrument, and the store keys
+        its tree by the bare symbol, so it is read off and dropped.
+        """
+        return False
+
+    @property
     def must_replace_existing_bars(self) -> bool:
         """Whether this archive is the whole history of every ticker it names.
 
@@ -179,7 +193,9 @@ class DelistedBarsRequest(BarsRequest):
     selector: DelistedArchive | DelistedUpdate = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        self._file_under(Dataset.DELISTED)
+        # no dataset: a delisted stock is filed under its bare symbol, beside
+        # the bars the listed bundle carries for it
+        self._file_under(None)
         timeframe = self._stated(self.bar_type.timeframe, "timeframe")
         # UNADJUSTED reaches only 1min here, where the listed rule takes 1day too
         if (
@@ -192,6 +208,10 @@ class DelistedBarsRequest(BarsRequest):
             )
         # no restated guard: a delisted fetch has no period and is always whole,
         # so there is no increment to splice onto a rewritten history
+
+    @property
+    def payload_names_carry_delisted_suffix(self) -> bool:
+        return True
 
     @property
     def must_replace_existing_bars(self) -> bool:

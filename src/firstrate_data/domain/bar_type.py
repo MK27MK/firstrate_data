@@ -1,14 +1,13 @@
 from dataclasses import dataclass, fields, replace
 from typing import Literal, Self, overload
 
-from firstrate_data.domain.enums import Adjustment, AssetType, Dataset, Timeframe
+from firstrate_data.domain.enums import Adjustment, AssetType, Timeframe
 
 
 @dataclass(frozen=True, slots=True)
 class BarType:
     # declared in the same order used as the store's paths.
     asset_type: AssetType | None = None
-    dataset: Dataset | None = None
     adjustment: Adjustment | None = None
     timeframe: Timeframe | None = None
     ticker: str | None = None
