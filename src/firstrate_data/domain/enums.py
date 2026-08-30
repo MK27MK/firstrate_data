@@ -83,10 +83,11 @@ class Period(StrEnum):
     DAY = auto()
 
 
-class MetafileType(StrEnum):
+class OtherData(StrEnum):
     SPLITS = auto()
     DIVIDENDS = auto()
-    CONTIN_AUDIT = "contin_audit"
+    COMPANY_PROFILES = auto()
+    CONTRACT_DATES = "contin_audit"
 
 
 class ContractFiles(StrEnum):

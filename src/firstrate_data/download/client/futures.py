@@ -3,7 +3,7 @@ from firstrate_data.domain import (
     BarType,
     ContinuousFuturesAdjustment,
     ContractFiles,
-    MetafileType,
+    OtherData,
     Period,
     Timeframe,
 )
@@ -11,7 +11,7 @@ from firstrate_data.download.client.client import Client
 from firstrate_data.download.requests import (
     BarsRequest,
     ContractBarsRequest,
-    MetafileRequest,
+    OtherDataRequest,
 )
 from firstrate_data.store.store import Ingested
 
@@ -119,5 +119,5 @@ class FuturesClient(Client):
         ``Store.contin_audit()``.
         """
         return self._download(
-            MetafileRequest(self._asset_type, MetafileType.CONTIN_AUDIT),
+            OtherDataRequest(self._asset_type, OtherData.CONTRACT_DATES),
         )

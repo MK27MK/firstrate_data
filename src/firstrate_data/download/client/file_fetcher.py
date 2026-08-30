@@ -448,7 +448,7 @@ class FileFetcher:
             msg = f"{label}: empty body"
             raise IncompleteDownload(msg)
 
-        # a metafile is allowed to arrive as a bare CSV, so "not a zip" is not by
+        # other_data is allowed to arrive as a bare CSV, so "not a zip" is not by
         # itself a failure -- but a body that claims to be one must open
         if zipfile.is_zipfile(partial):
             try:

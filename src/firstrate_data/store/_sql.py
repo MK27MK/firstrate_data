@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from firstrate_data.domain import AssetType, BarType, Dataset, MetafileType, Timeframe
+from firstrate_data.domain import AssetType, BarType, Dataset, OtherData, Timeframe
 
 # Where ``store_rejects`` puts the lines it couldn't parse. DuckDB creates both
 # as temp tables on the first scan that rejects anything, then *appends* to
@@ -39,16 +39,17 @@ QUARANTINE_SCHEMA: dict[str, str] = {
 #
 # ``contin_audit`` is missing on purpose: futures-only, never yet served, so
 # there is no row format to pin. It stays on the sniffer. See issue #15.
-METAFILE_SCHEMA: dict[MetafileType, dict[str, str]] = {
-    MetafileType.SPLITS: {"date": "DATE", "ratio": "DOUBLE"},
-    MetafileType.DIVIDENDS: {"date": "DATE", "amount": "DOUBLE"},
+OTHER_DATA_SCHEMA: dict[OtherData, dict[str, str]] = {
+    OtherData.SPLITS: {"date": "DATE", "ratio": "DOUBLE"},
+    OtherData.DIVIDENDS: {"date": "DATE", "amount": "DOUBLE"},
+    # TODO add company profiles and contract dates
 }
 
 # The ticker is in the payload's *name* and nowhere in its rows, so it's the
 # one column a metafile can't skip. The vendor suffixes the dividends
 # payloads (``AAPL_divs.txt``) and leaves the splits ones bare
 # (``AAPL.txt``). The suffix isn't part of the ticker.
-METAFILE_SUFFIX: dict[MetafileType, str] = {MetafileType.DIVIDENDS: "_divs"}
+OTHER_DATA_SUFFIX: dict[OtherData, str] = {OtherData.DIVIDENDS: "_divs"}
 
 # The six columns every bar has, typed as the parquet tree holds them.
 # ``open_interest`` is NULL where the source omits it rather than absent. A
@@ -79,10 +80,10 @@ SIDECAR_PREFIX = "._"
 # the only signal the store has that ingest lost lines, and one that fires on
 # every fetch is worse than no signal at all. No ticker starts with an
 # underscore, which is what makes the prefix a safe rule.
-METAFILE_NOTE_PREFIX = "_"
+OTHER_DATA_NOTE_PREFIX = "_"
 
 
-def is_metafile_payload(name: str) -> bool:
+def is_other_data_payload(name: str) -> bool:
     """Whether a file in a metafile archive holds one ticker's rows.
 
     Examples
@@ -95,7 +96,7 @@ def is_metafile_payload(name: str) -> bool:
     False
 
     """
-    return not name.startswith((SIDECAR_PREFIX, METAFILE_NOTE_PREFIX))
+    return not name.startswith((SIDECAR_PREFIX, OTHER_DATA_NOTE_PREFIX))
 
 
 def sql_literal(value: str) -> str:
@@ -147,15 +148,6 @@ def hive_ticker_expression(column: str) -> str:
     # a level bounded by ``/`` alone would swallow the rest of the path into
     # the ticker
     return f"regexp_extract({column}, '{TICKER_LEVEL}([^/\\\\]+)', 1)"
-
-
-def bar_timezone(asset_type: AssetType) -> str:
-    """Name the IANA timezone the vendor stamps `asset_type`'s bars in."""
-    # the vendor's stated rule: U.S. Eastern for everything except crypto,
-    # which trades around the clock and carries a UTC stamp instead
-    if asset_type is AssetType.CRYPTO:
-        return "UTC"
-    return "America/New_York"
 
 
 def payload_tickers_select(directory: Path, dataset: Dataset) -> str:
@@ -216,7 +208,7 @@ def bars_select(
         OPEN_INTEREST if has_open_interest else f"NULL::BIGINT AS {OPEN_INTEREST}"
     )
     files = sql_list(str(payload) for payload in payloads)
-    stamped = sql_literal(bar_timezone(asset_type))
+    stamped = sql_literal(asset_type.timezone())
     # the tree is the only record of these -- they're nowhere in the payload,
     # so a level this stops selecting here would read back as NULL
     levels = ",\n            ".join(
@@ -257,21 +249,21 @@ def bars_select(
     """  # noqa: S608
 
 
-def metafile_ticker_expression(column: str, metafile_type: MetafileType) -> str:
-    """Build an SQL expression extracting the ticker from a metafile payload's name."""
+def other_data_ticker_expression(column: str, other_data: OtherData) -> str:
+    """Build an SQL expression extracting the ticker from a other_data payload's name."""
     stem = f"parse_filename({column}, true)"
-    suffix = METAFILE_SUFFIX.get(metafile_type)
+    suffix = OTHER_DATA_SUFFIX.get(other_data)
     if suffix is None:
         return stem
     return f"regexp_replace({stem}, {sql_literal(f'{suffix}$')}, '')"
 
 
-def metafile_select(
+def other_data_select(
     payloads: Iterable[Path],
-    metafile_type: MetafileType,
+    other_data: OtherData,
     per_ticker: bool,  # noqa: FBT001 - store.py's only caller passes it positionally
 ) -> str:
-    """Build a SELECT reading one metafile's payloads as its own table.
+    """Build a SELECT reading one other_data's payloads as its own table.
 
     ``per_ticker`` says the payloads came out of an archive, one file per
     ticker: this expression recovers the ticker from the filename because the
@@ -279,7 +271,7 @@ def metafile_select(
     (issue #15).
     """
     files = sql_list(str(payload) for payload in payloads)
-    declared = METAFILE_SCHEMA.get(metafile_type)
+    declared = OTHER_DATA_SCHEMA.get(other_data)
     if declared is None or not per_ticker:
         # sql_list() escapes files, which never comes from user input
         return f"SELECT * FROM read_csv({files}, store_rejects = true)"  # noqa: S608
@@ -287,11 +279,11 @@ def metafile_select(
     columns = ", ".join(f"'{name}': '{kind}'" for name, kind in declared.items())
 
     # sql_list() escapes files. columns and declared come from this module's
-    # METAFILE_SCHEMA constant. metafile_ticker_expression() only assembles
+    # OTHER_DATA_SCHEMA constant. other_data_ticker_expression() only assembles
     # internal SQL fragments. None of this comes from user input.
     return f"""
         SELECT
-            {metafile_ticker_expression("filename", metafile_type)} AS ticker,
+            {other_data_ticker_expression("filename", other_data)} AS ticker,
             {", ".join(declared)}
         FROM read_csv(
             {files},

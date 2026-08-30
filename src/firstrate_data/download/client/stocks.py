@@ -4,7 +4,7 @@ from firstrate_data.domain import (
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
-    MetafileType,
+    OtherData,
     Period,
     Timeframe,
 )
@@ -12,7 +12,7 @@ from firstrate_data.download.client.client import Client
 from firstrate_data.download.requests import (
     BarsRequest,
     DelistedBarsRequest,
-    MetafileRequest,
+    OtherDataRequest,
 )
 from firstrate_data.store.store import Ingested
 
@@ -78,7 +78,7 @@ class StockClient(Client):
         Replaces the ``splits`` table whole. Read it back with
         ``Store.splits()``.
         """
-        return self._download(MetafileRequest(self._asset_type, MetafileType.SPLITS))
+        return self._download(OtherDataRequest(self._asset_type, OtherData.SPLITS))
 
     def download_dividends(self) -> Ingested:
         """Historical dividends: {ex-dividend date,dividend amount}.
@@ -86,7 +86,7 @@ class StockClient(Client):
         Replaces the ``dividends`` table whole. Read it back with
         ``Store.dividends()``.
         """
-        return self._download(MetafileRequest(self._asset_type, MetafileType.DIVIDENDS))
+        return self._download(OtherDataRequest(self._asset_type, OtherData.DIVIDENDS))
 
     # Delisted Ticker Data ---------------------------------------------
 

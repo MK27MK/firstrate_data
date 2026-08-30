@@ -10,7 +10,7 @@ from firstrate_data.domain import (
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
-    MetafileType,
+    OtherData,
     Period,
     Timeframe,
 )
@@ -276,16 +276,16 @@ class TickerListingRequest:
 
 
 @dataclass(frozen=True, slots=True)
-class MetafileRequest:
+class OtherDataRequest:
     endpoint: ClassVar[str] = "meta_file"
     asset_type: AssetType
-    metafile_type: MetafileType
+    other_data: OtherData
 
     def to_params(self) -> dict[str, str]:
         return {
             "type": self.asset_type.value,
-            "metafile_type": self.metafile_type.value,
+            "other_data": self.other_data.value,
         }
 
 
-type IngestibleRequest = BarsRequest | MetafileRequest
+type IngestibleRequest = BarsRequest | OtherDataRequest
