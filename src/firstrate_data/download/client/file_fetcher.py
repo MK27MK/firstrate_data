@@ -12,7 +12,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from firstrate_data.download.progress import NullProgress, ProgressReporter
+from firstrate_data.download import progress
 from firstrate_data.download.requests import Request
 
 # 1 MiB: large enough that a multi-GB archive isn't paid for one syscall at a
@@ -48,7 +48,7 @@ class _StalePartialError(Exception):
 
 
 @dataclass(frozen=True, slots=True)
-class Fetched:
+class FetchedFile:
     """One archive, on disk and verified. Carries no bytes: never resident."""
 
     path: Path
@@ -84,26 +84,6 @@ class _Meter:
     digest: "hashlib._Hash" = field(default_factory=hashlib.sha256)
 
 
-def _describe(request: Request) -> str:
-    """Describe a request as one line of bar label.
-
-    ``data_file stock/full/1min/adj_split/A``.
-    """
-    return f"{request.endpoint} {'/'.join(request.to_params().values())}"
-
-
-def _spool_name(request: Request) -> str:
-    """Build a filename that is a function of the request.
-
-    Two processes asking for the same archive land on the same partial, so the
-    second process can finish the work the first one started.
-
-    """
-    parts = [request.endpoint, *request.to_params().values()]
-    safe = ("".join(c if c.isalnum() or c in "-." else "_" for c in p) for p in parts)
-    return "_".join(safe)
-
-
 def _fingerprint(response: requests.Response, total: int | None) -> dict[str, object]:
     """Identify the body a partial was cut from.
 
@@ -120,8 +100,8 @@ def _fingerprint(response: requests.Response, total: int | None) -> dict[str, ob
     }
 
 
-class ArchiveFetcher:
-    """Fetches archives to a spool directory, and small bodies straight to text.
+class FileFetcher:
+    """Download archives to a spool directory, and small bodies straight to text.
 
     Safe to call from many threads.
 
@@ -139,14 +119,12 @@ class ArchiveFetcher:
         max_workers: int = 4,
         chunk_size: int = CHUNK_SIZE,
         attempts: int = 5,
-        progress: ProgressReporter | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._user_id = user_id
         self._spool = spool
         self._chunk_size = chunk_size
         self._attempts = attempts
-        self._progress = NullProgress() if progress is None else progress
 
         self._local = threading.local()
         # every session this fetcher has handed out, so close() can reach the
@@ -163,7 +141,6 @@ class ArchiveFetcher:
 
     @property
     def spool(self) -> Path:
-        """Where archives land, and where an interrupted one waits to be resumed."""
         return self._spool
 
     def fetch(
@@ -171,7 +148,7 @@ class ArchiveFetcher:
         request: Request,
         label: str | None = None,
         name: str | None = None,
-    ) -> Fetched:
+    ) -> FetchedFile:
         """Fetch one archive into the spool and return where it landed.
 
         Retries and resumes are the same code path: a transfer that died at byte
@@ -198,8 +175,12 @@ class ArchiveFetcher:
             archive itself is on disk and never in memory.
 
         """
-        label = _describe(request) if label is None else label
-        destination = self._spool / (name or _spool_name(request))
+        label = (
+            f"{request.endpoint} {'/'.join(request.to_params().values())}"
+            if label is None
+            else label
+        )
+        destination = self._spool / (name or self._spool_name(request))
         partial = destination.with_name(destination.name + _PARTIAL_SUFFIX)
         started = time.monotonic()
         resumed_from = 0
@@ -227,7 +208,7 @@ class ArchiveFetcher:
             size = self._verified(partial, label)
             partial.replace(destination)
             _meta_path(partial).unlink(missing_ok=True)
-            return Fetched(
+            return FetchedFile(
                 path=destination,
                 size=size,
                 sha256=meter.digest.hexdigest(),
@@ -264,6 +245,14 @@ class ArchiveFetcher:
         # 2, 4, 8... capped: a link that just dropped a multi-GB transfer is
         # not helped by being asked again immediately
         time.sleep(min(2**attempt, 60))
+
+    @staticmethod
+    def _spool_name(request: Request) -> str:
+        parts = [request.endpoint, *request.to_params().values()]
+        safe = (
+            "".join(c if c.isalnum() or c in "-." else "_" for c in p) for p in parts
+        )
+        return "_".join(safe)
 
     def read(self, request: Request) -> str:
         """Fetch one endpoint's body as text, without touching the spool.
@@ -412,7 +401,7 @@ class ArchiveFetcher:
         meter: _Meter,
         label: str,
     ) -> None:
-        with self._progress.track(label, total, "B") as advance:
+        with progress.track(label, total, "B") as advance:
             advance(keep)
             with partial.open("ab" if keep else "wb") as spooled:
                 mark = time.monotonic()
