@@ -1,7 +1,7 @@
 from dataclasses import dataclass, fields, replace
 from typing import Literal, Self, overload
 
-from firstrate_data.domain import Adjustment, AssetType, Dataset, Timeframe
+from firstrate_data.domain.enums import Adjustment, AssetType, Dataset, Timeframe
 
 
 @dataclass(frozen=True, slots=True)

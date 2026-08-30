@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import StrEnum, auto
 from typing import Self
 
@@ -22,92 +24,42 @@ class Dataset(StrEnum):
     CONTRACT = auto()
 
     @classmethod
-    def default_from_asset_type(cls, asset_type: AssetType) -> "Dataset":
+    def default_from_asset_type(cls, asset_type: AssetType) -> Dataset:
         return cls.CONTINUOUS if asset_type is AssetType.FUTURES else cls.LISTED
 
 
 # adjustments ----------------------------------------------------------
 
 
-class EquitiesAdjustment(StrEnum):
+class Adjustment(StrEnum):
+    @property
+    def changes_past(self) -> bool:
+        """Return `True` for all adjustments which are not `UNADJUSTED`.
+
+        A series holding these kind of adjustments need to be fully replaced
+        when a new adjustment comes.
+        """
+        return self.name != "UNADJUSTED"
+
+
+class EquitiesAdjustment(Adjustment):
     SPLIT = "adj_split"
     SPLIT_AND_DIVIDEND = "adj_splitdiv"
     UNADJUSTED = "UNADJUSTED"
 
-    @property
-    def is_restated(self) -> bool:
-        """Whether the vendor rewrites this series' past when an action lands.
 
-        Every split or dividend rescales all bars before it, so two
-        fetches of a restated series sit on different bases that no join
-        reconciles. Unadjusted prices are never restated.
-        """
-        return self is not EquitiesAdjustment.UNADJUSTED
-
-
-class ContinuousFuturesAdjustment(StrEnum):
+class ContinuousFuturesAdjustment(Adjustment):
     RATIO = "contin_adj_ratio"
     ABSOLUTE = "contin_adj_absolute"
     UNADJUSTED = "contin_UNadj"
 
-    @property
-    def is_restated(self) -> bool:
-        """Whether the vendor rewrites this series' past when a roll lands.
 
-        A ratio- or absolute-adjusted continuous series rescales or shifts
-        the history behind each new roll, exactly as a split does.
-        ``contin_UNadj`` is raw trade data and is never restated.
-        """
-        return self is not ContinuousFuturesAdjustment.UNADJUSTED
-
-
-class FuturesContractAdjustment(StrEnum):
-    """The one basis the vendor serves an individual contract on.
-
-    ``futures_contract`` takes no ``adjustment``: a real contract has no
-    roll to correct for, the roll being a property of the continuous series
-    built from many of them. A store-side value, like ``IndexAdjustment``,
-    and never sent.
-    """
-
+class FuturesContractAdjustment(Adjustment):
     UNADJUSTED = "UNADJUSTED"
 
-    @property
-    def is_restated(self) -> bool:
-        """Whether the vendor rewrites this series' past. Never, for a contract.
 
-        A contract's prices are the trades that happened in it. Nothing later
-        rebases them, so a fetch can extend a contract rather than replace it.
-        """
-        return False
-
-
-class IndexAdjustment(StrEnum):
-    """The one basis the vendor serves an index on.
-
-    ``data_file`` takes no ``adjustment`` for ``type=index``, so this is
-    a store-side value: the bar type names an ``adjustment`` at every
-    level, and an index's is none.
-    """
-
+class IndexAdjustment(Adjustment):
     UNADJUSTED = "UNADJUSTED"
-
-    @property
-    def is_restated(self) -> bool:
-        """Whether the vendor rewrites this series' past. Never, for an index.
-
-        An index level is a published number, not a price the vendor rebases:
-        there is no corporate action or roll behind it to restate it.
-        """
-        return False
-
-
-type Adjustment = (
-    EquitiesAdjustment
-    | ContinuousFuturesAdjustment
-    | FuturesContractAdjustment
-    | IndexAdjustment
-)
 
 
 class Timeframe(StrEnum):
