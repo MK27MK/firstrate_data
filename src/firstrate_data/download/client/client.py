@@ -15,7 +15,6 @@ from firstrate_data.download.client.file_fetcher import FetchedFile, FileFetcher
 from firstrate_data.download.requests import (
     IngestibleRequest,
     LastUpdateRequest,
-    MetafileRequest,
     TickerListingRequest,
 )
 from firstrate_data.store.store import Ingested, Store
@@ -84,18 +83,8 @@ class Client(ABC):
     ) -> FetchedFile:
         return self._fetcher.fetch(request, name=name)
 
-    def _ingest(self, file: FetchedFile, request: IngestibleRequest) -> Ingested:
-        try:
-            if isinstance(request, MetafileRequest):
-                return self._store.ingest_metafile(file.path, request.metafile_type)
-            return self._store.ingest_bars(file.path, request)
-        finally:
-            # parquet is the only copy, and that goes for the vendor's zip on
-            # its way in as much as for the CSV it unzips to
-            file.path.unlink(missing_ok=True)
-
     def _download(self, request: IngestibleRequest) -> Ingested:
-        return self._ingest(self._fetch(request), request)
+        return self.store.ingest(self._fetch(request), request)
 
     # ------------------------------------------------------------------
     # text endpoints - they dont ingest anything.

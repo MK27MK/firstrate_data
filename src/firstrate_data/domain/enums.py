@@ -13,6 +13,11 @@ class AssetType(StrEnum):
     FX = auto()
     OPTIONS = auto()
 
+    def timezone(self) -> str:
+        if self is AssetType.CRYPTO:
+            return "UTC"
+        return "America/New_York"
+
 
 EQUITIES = (AssetType.STOCK, AssetType.ETF)
 

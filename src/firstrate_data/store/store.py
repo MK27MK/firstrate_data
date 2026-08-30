@@ -28,11 +28,16 @@ from firstrate_data.domain import (
     ContinuousFuturesAdjustment,
     Dataset,
     EquitiesAdjustment,
-    MetafileType,
+    OtherData,
     Timeframe,
     TradingHours,
 )
-from firstrate_data.download.requests import BarsRequest
+from firstrate_data.download.client.file_fetcher import FetchedFile
+from firstrate_data.download.requests import (
+    BarsRequest,
+    IngestibleRequest,
+    OtherDataRequest,
+)
 from firstrate_data.store import _deflate64, _sql
 
 # Where the rejected lines are kept, one parquet file per ingest that rejected
@@ -46,15 +51,13 @@ _QUARANTINE_DIRECTORY = "quarantine"
 # See docs/notes/duckdb/partitioned-copy-ooms-past-a-few-thousand-partitions.md.
 _TICKERS_PER_COPY = 250
 
-# The store keeps to one subdirectory of the path it is handed, so that path may
-# be a volume root, a home directory, or anything else already holding something.
-_STORE_DIRECTORY = "firstrate_data"
-
 # macOS drops an AppleDouble sidecar (``._name``) beside every file written to
 # a non-native filesystem (exFAT, NTFS, network shares); it matches a bare
 # ``*.parquet`` glob but isn't parquet. Store file names always start with the
 # date that produced them, so anchoring on that digit excludes the sidecar.
 PARQUET_FILES = "[0-9]*.parquet"
+
+TIMEZONE = "America/New_York"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,45 +95,24 @@ class Ingested:
 
 
 class Store:
-    """The on-disk store: a Hive-partitioned parquet tree of bars, plus the
-    corporate-action metafiles that explain their adjustments.
-
-    Archives are ingested on arrival and not retained, so this is the only copy
-    of the data -- a lost bar type is re-downloaded, not rebuilt.
-
-    Holds a DuckDB connection for its lifetime. Use it as a context manager, or
-    call ``close()`` when done; a store that is never closed holds the
-    connection until it is collected.
+    """_summary_.
 
     Parameters
     ----------
     directory : Path
-        Where to keep the store. It gets a ``firstrate_data/`` subdirectory of
-        its own and writes nothing beside it, so a volume root is a fine answer.
-        Created if it does not exist.
-    spool : Path | None
-        Where incoming archives wait, if not the store's own ``spool/``.
-        Overriding it puts an archive on a disk that need not have room for it,
-        so state it only with a reason -- a benchmark measuring one volume, or a
-        store whose own disk is full.
+        Store will be created at directory/firstrate_data.
 
     """
 
-    def __init__(self, directory: Path, spool: Path | None = None) -> None:
-        # everything below is derived from the store root, not from `directory`
-        # again: the two drifted apart once and split the spool from the tree
-        self._directory = directory / _STORE_DIRECTORY
-        # bars under their own root, so the metafile tables sit beside it
-        # without a glob ever having to tell them apart
+    def __init__(self, directory: Path) -> None:
+        self._directory = directory / "firstrate_data"
         self._bars_directory = self._directory / "bars"
-        # resolved here even when overridden, so there is one answer to where
-        # the spool is rather than one per caller that thought to ask
-        self._spool = self._directory / "spool" if spool is None else spool
+        self._spool = self._directory / "spool"
+
         self._connection = duckdb.connect()
         self._configure(self._connection)
 
     def _configure(self, connection: duckdb.DuckDBPyConnection) -> None:
-        """Settings a store-sized ingest needs and a scratch query does not."""
         # DuckDB spills to `.tmp` in the working directory by default, which is
         # the machine's boot disk. We make it spill inside the store.
         # https://duckdb.org/docs/stable/guides/performance/how_to_tune_workloads#spilling-to-disk
@@ -143,12 +125,11 @@ class Store:
         # only costs memory -- and it costs it in proportion to the archive
         connection.execute("SET preserve_insertion_order = false")
 
-        # See docs/notes/duckdb/session-timezone-defaults-to-machine-locale.md.
-        connection.execute(f"SET TimeZone = '{_sql.bar_timezone(AssetType.STOCK)}'")
+        connection.execute(f"SET TimeZone = '{TIMEZONE}'")
 
     @classmethod
-    def from_env(cls, spool: Path | None = None) -> Self:
-        """A store at the path the environment names.
+    def from_env(cls) -> Self:
+        """Return a Store with directory set from the .env file.
 
         Raises
         ------
@@ -156,16 +137,10 @@ class Store:
             If ``FIRSTRATE_DATA_PATH`` is not set.
 
         """
-        return cls(config.firstrate_data_path(), spool)
+        return cls(config.firstrate_data_path())
 
     def close(self) -> None:
-        """Release the DuckDB connection. Safe to call more than once.
-
-        The relations the read methods returned are lazy, so they are only
-        readable while the store that made them is open.
-        """
-        # no closed flag: DuckDB's own close() is a no-op on an already closed
-        # connection, so the second call is the first one's business, not ours
+        """Release the DuckDB connection."""
         self._connection.close()
 
     def __enter__(self) -> Self:
@@ -181,14 +156,6 @@ class Store:
 
     @property
     def spool(self) -> Path:
-        """Where a download parks an archive on its way in. Created if absent.
-
-        Inside the store by default, not the system temp: an incoming archive is
-        the size of the store it is joining, and only one disk has room for
-        both. Placed here rather than by each caller, which once put the two on
-        different volumes -- a caller with a reason states it to the constructor
-        instead, where that rule is written down.
-        """
         self._spool.mkdir(parents=True, exist_ok=True)
         return self._spool
 
@@ -208,7 +175,7 @@ class Store:
     # writing methods
     # ------------------------------------------------------------------
 
-    def ingest_bars(self, archive: Path, source_request: BarsRequest) -> Ingested:
+    def _ingest_bars(self, archive: Path, request: BarsRequest) -> Ingested:
         """File one bars archive into the tree, and keep nothing else.
 
         The archive is unzipped inside the store, read, and deleted. Whether it
@@ -223,7 +190,7 @@ class Store:
         non-zero ``Ingested.suspect`` means the opposite -- rows that parsed and
         are in the tree, but do not hold together as bars.
         """
-        bar_type = source_request.bar_type
+        bar_type = request.bar_type
         if bar_type.dataset is None:
             msg = "an ingest needs a bar_type naming a dataset"
             raise ValueError(msg)
@@ -234,7 +201,7 @@ class Store:
 
         with self._unzipped(archive) as staging:
             payloads = self._payloads_by_ticker(staging, bar_type.dataset)
-            if source_request.must_replace_existing_bars:
+            if request.must_replace_existing_bars:
                 self._remove_existing_bars(bar_type, payloads)
 
             columns_in_payload = _sql.payload_columns(
@@ -245,7 +212,7 @@ class Store:
             for batch in batched(payloads.items(), _TICKERS_PER_COPY, strict=False):
                 rows += self._copy_batch(
                     bar_type,
-                    replaces=source_request.must_replace_existing_bars,
+                    replaces=request.must_replace_existing_bars,
                     payloads=dict(batch),
                     columns_in_payload=columns_in_payload,
                     ingest=ingest,
@@ -260,7 +227,7 @@ class Store:
             damaged,
         )
 
-    def ingest_metafile(self, content: Path, metafile_type: MetafileType) -> Ingested:
+    def _ingest_other_data(self, content: Path, other_data: OtherData) -> Ingested:
         """Replace one metafile table -- splits, dividends, or the continuous audit.
 
         Replaced whole rather than reconciled: a metafile is small, the vendor
@@ -270,16 +237,16 @@ class Store:
         accepted. ``Ingested.tickers`` is None -- a metafile has no ticker
         dimension in the layout.
         """
-        target = self._metafile_path(metafile_type)
+        target = self._other_data_path(other_data)
 
-        with self._metafile_payloads(content, metafile_type) as (
+        with self._other_data_payloads(content, other_data) as (
             payloads,
             per_ticker,
         ):
             # written beside the target and swapped in, so a reader either sees
             # the previous table whole or the new one, never a half-written file
             staged = target.with_name(f"{target.name}.partial")
-            select = _sql.metafile_select(payloads, metafile_type, per_ticker)
+            select = _sql.other_data_select(payloads, other_data, per_ticker)
             rows = self._execute_counting(f"""
                 COPY ({select})
                 TO {_sql.sql_literal(str(staged))} (FORMAT PARQUET, COMPRESSION ZSTD)
@@ -290,6 +257,16 @@ class Store:
         # a metafile is a corporate action, not a bar: there is no open, high,
         # low or close for the suspect rule to hold against
         return Ingested(None, rows, 0, quarantine, damaged)
+
+    def ingest(self, file: FetchedFile, request: IngestibleRequest) -> Ingested:
+        try:
+            if isinstance(request, OtherDataRequest):
+                return self._ingest_other_data(file.path, request.other_data)
+            return self._ingest_bars(file.path, request)
+        finally:
+            # parquet is the only copy, and that goes for the vendor's zip on
+            # its way in as much as for the CSV it unzips to
+            file.path.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # reading methods
@@ -494,15 +471,15 @@ class Store:
 
     def splits(self) -> duckdb.DuckDBPyRelation:
         """The splits metafile, as a lazy relation."""
-        return self._metafile(MetafileType.SPLITS)
+        return self._other_data(OtherData.SPLITS)
 
     def dividends(self) -> duckdb.DuckDBPyRelation:
         """The dividends metafile, as a lazy relation."""
-        return self._metafile(MetafileType.DIVIDENDS)
+        return self._other_data(OtherData.DIVIDENDS)
 
     def contin_audit(self) -> duckdb.DuckDBPyRelation:
         """Which individual contracts were stitched into the continuous series."""
-        return self._metafile(MetafileType.CONTIN_AUDIT)
+        return self._other_data(OtherData.CONTRACT_DATES)
 
     def tickers_list(self, bar_type: BarType) -> list[str]:
         # not ``GROUP BY ticker`` over the tree, which reads no bar column but
@@ -707,10 +684,10 @@ class Store:
         ).fetchall()
 
     @contextmanager
-    def _metafile_payloads(
+    def _other_data_payloads(
         self,
         content: Path,
-        metafile_type: MetafileType,
+        other_data: OtherData,
     ) -> Generator[tuple[list[Path], bool]]:
         """The metafile's CSV on disk, however the vendor wrapped it.
 
@@ -724,7 +701,7 @@ class Store:
                 # copied rather than read in place: the staging directory is
                 # what this scope promises to clean up, and the spooled file is
                 # the caller's
-                bare = staging / f"{metafile_type.value}.csv"
+                bare = staging / f"{other_data.value}.csv"
                 shutil.copyfile(content, bare)
                 yield [bare], False
             else:
@@ -734,10 +711,10 @@ class Store:
                 payloads = sorted(
                     path
                     for path in staging.iterdir()
-                    if path.is_file() and _sql.is_metafile_payload(path.name)
+                    if path.is_file() and _sql.is_other_data_payload(path.name)
                 )
                 if not payloads:
-                    msg = f"{metafile_type.value} archive holds no payload"
+                    msg = f"{other_data.value} archive holds no payload"
                     raise ValueError(msg)
                 yield payloads, True
         finally:
@@ -876,16 +853,16 @@ class Store:
             )
         return bars_relation
 
-    def _metafile_path(self, metafile_type: MetafileType) -> Path:
-        return self._directory / f"{metafile_type.value}.parquet"
+    def _other_data_path(self, other_data: OtherData) -> Path:
+        return self._directory / f"{other_data.value}.parquet"
 
-    def _metafile(self, metafile_type: MetafileType) -> duckdb.DuckDBPyRelation:
-        path = self._metafile_path(metafile_type)
+    def _other_data(self, other_data: OtherData) -> duckdb.DuckDBPyRelation:
+        path = self._other_data_path(other_data)
         # unlike bars, a missing metafile cannot become an empty relation of the
         # right shape: the vendor's columns are whatever the sniffer read, so
         # there is no shape to return
         if not path.exists():
-            msg = f"no {metafile_type.value} metafile in this store -- fetch it first"
+            msg = f"no {other_data.value} metafile in this store -- fetch it first"
             raise FileNotFoundError(
                 msg,
             )
