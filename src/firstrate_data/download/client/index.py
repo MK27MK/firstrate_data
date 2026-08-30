@@ -1,7 +1,7 @@
 from firstrate_data.domain import (
+    Adjustment,
     AssetType,
     BarType,
-    IndexAdjustment,
     Period,
     Timeframe,
 )
@@ -48,7 +48,7 @@ class IndexClient(Client):
             BarType(
                 self._asset_type,
                 timeframe=timeframe,
-                adjustment=IndexAdjustment.UNADJUSTED,
+                adjustment=Adjustment.UNADJUSTED,
             ),
             period,
         )

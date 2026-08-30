@@ -32,6 +32,8 @@ class Dataset(StrEnum):
 
 
 class Adjustment(StrEnum):
+    UNADJUSTED = "UNADJUSTED"
+
     @property
     def changes_past(self) -> bool:
         """Return `True` for all adjustments which are not `UNADJUSTED`.
@@ -52,14 +54,6 @@ class ContinuousFuturesAdjustment(Adjustment):
     RATIO = "contin_adj_ratio"
     ABSOLUTE = "contin_adj_absolute"
     UNADJUSTED = "contin_UNadj"
-
-
-class FuturesContractAdjustment(Adjustment):
-    UNADJUSTED = "UNADJUSTED"
-
-
-class IndexAdjustment(Adjustment):
-    UNADJUSTED = "UNADJUSTED"
 
 
 class Timeframe(StrEnum):

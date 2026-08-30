@@ -10,11 +10,11 @@ from firstrate_data.domain import (
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
-    FuturesContractAdjustment,
     MetafileType,
     Period,
     Timeframe,
 )
+from firstrate_data.domain.enums import Adjustment
 
 
 class Request(Protocol):
@@ -228,7 +228,7 @@ class ContractBarsRequest(BarsRequest):
         object.__setattr__(
             self,
             "bar_type",
-            replace(self.bar_type, adjustment=FuturesContractAdjustment.UNADJUSTED),
+            replace(self.bar_type, adjustment=Adjustment.UNADJUSTED),
         )
 
     @property
@@ -286,5 +286,6 @@ class MetafileRequest:
             "type": self.asset_type.value,
             "metafile_type": self.metafile_type.value,
         }
+
 
 type IngestibleRequest = BarsRequest | MetafileRequest
