@@ -6,7 +6,6 @@ from firstrate_data.domain import (
     AssetType,
     BarType,
     ContractFiles,
-    Dataset,
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
@@ -14,7 +13,7 @@ from firstrate_data.domain import (
     Period,
     Timeframe,
 )
-from firstrate_data.domain.enums import Adjustment
+from firstrate_data.domain.enums import Unadjusted
 
 
 class Request(Protocol):
@@ -42,11 +41,6 @@ class BarsRequest:
     # fourth asset type. No path can send an unconstructible request.
     def __post_init__(self) -> None:
         asset_type = self._stated(self.bar_type.asset_type, "asset type")
-        # only futures are filed under a dataset, and this endpoint serves
-        # their continuous series; the individual contracts have their own
-        self._file_under(
-            Dataset.CONTINUOUS if asset_type is AssetType.FUTURES else None,
-        )
         self._stated(self.period, "period")
 
         if asset_type in EQUITIES:
@@ -79,11 +73,6 @@ class BarsRequest:
             raise NotOfferedError(
                 msg,
             )
-
-    def _file_under(self, dataset: Dataset | None) -> None:
-        """State the dataset on ``bar_type``, over whatever it arrived with."""
-        # the supported way to normalise a field of a frozen dataclass
-        object.__setattr__(self, "bar_type", replace(self.bar_type, dataset=dataset))
 
     def _stated[Named](self, value: Named | None, what: str) -> Named:
         """``value``, or a refusal naming what this endpoint wasn't told.
@@ -134,16 +123,6 @@ class BarsRequest:
             object.__setattr__(self, "ticker_range", letter)
 
     @property
-    def payload_names_carry_delisted_suffix(self) -> bool:
-        """Whether the payload filenames suffix the ticker with ``-DELISTED``.
-
-        Only the delisted endpoint does. The suffix names the bundle the
-        payload came out of rather than the instrument, and the store keys
-        its tree by the bare symbol, so it is read off and dropped.
-        """
-        return False
-
-    @property
     def must_replace_existing_bars(self) -> bool:
         """Whether this archive is the whole history of every ticker it names.
 
@@ -164,7 +143,7 @@ class BarsRequest:
 
         # the index docs page lists no adjustment at all, and sending one the
         # endpoint doesn't document risks an unpredictable response body.
-        # IndexAdjustment exists for the bar type path, which names one at
+        # ``Unadjusted`` exists for the bar type path, which names one at
         # every level, and stops at the store's edge
         if asset_type is not AssetType.INDEX and self.bar_type.adjustment is not None:
             params["adjustment"] = self.bar_type.adjustment.value
@@ -193,25 +172,16 @@ class DelistedBarsRequest(BarsRequest):
     selector: DelistedArchive | DelistedUpdate = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        # no dataset: a delisted stock is filed under its bare symbol, beside
-        # the bars the listed bundle carries for it
-        self._file_under(None)
-        timeframe = self._stated(self.bar_type.timeframe, "timeframe")
-        # UNADJUSTED reaches only 1min here, where the listed rule takes 1day too
-        if (
-            self.bar_type.adjustment is EquitiesAdjustment.UNADJUSTED
-            and timeframe is not Timeframe.MIN_1
-        ):
-            msg = "UNADJUSTED delisted data is only available in the 1min timeframe"
-            raise NotOfferedError(
-                msg,
-            )
-        # no restated guard: a delisted fetch has no period and is always whole,
-        # so there is no increment to splice onto a rewritten history
+        self.raise_on_unavalaible_timeframes()
 
-    @property
-    def payload_names_carry_delisted_suffix(self) -> bool:
-        return True
+    def raise_on_unavalaible_timeframes(self) -> None:
+        if self.bar_type.adjustment is not EquitiesAdjustment.UNADJUSTED:
+            return
+
+        timeframe = self._stated(self.bar_type.timeframe, "timeframe")
+        if timeframe not in (Timeframe.MIN_1, Timeframe.DAY_1):
+            msg = "UNADJUSTED delisted data is only available in the 1min and daily timeframe"
+            raise NotOfferedError(msg)
 
     @property
     def must_replace_existing_bars(self) -> bool:
@@ -242,13 +212,12 @@ class ContractBarsRequest(BarsRequest):
     contract_files: ContractFiles = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        self._file_under(Dataset.CONTRACT)
         # the endpoint serves all five timeframes on both halves, so there is
         # nothing else here the vendor refuses
         object.__setattr__(
             self,
             "bar_type",
-            replace(self.bar_type, adjustment=Adjustment.UNADJUSTED),
+            replace(self.bar_type, adjustment=Unadjusted.UNADJUSTED),
         )
 
     @property

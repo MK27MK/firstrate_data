@@ -47,29 +47,6 @@ class StocksBundleConfig(EquitiesBundleConfig):
     # otherwise pass an iterable to select them.
     include_delisted_archives: bool | Iterable[DelistedArchive]
 
-    def __post_init__(self) -> None:
-        self.raise_on_unavalaible_delisted_timeframes()
-
-    def raise_on_unavalaible_delisted_timeframes(self) -> None:
-        if not self.include_delisted_archives:
-            return
-        if self.adjustment is not EquitiesAdjustment.UNADJUSTED:
-            return
-        requested_timeframes = (
-            tuple(Timeframe) if self.timeframes is None else self.timeframes
-        )
-        unavailable_timeframes = [
-            timeframe
-            for timeframe in requested_timeframes
-            if timeframe not in UNADJUSTED_DELISTED_TIMEFRAMES
-        ]
-        if unavailable_timeframes:
-            allowed = ", ".join(UNADJUSTED_DELISTED_TIMEFRAMES)
-            rejected = ", ".join(unavailable_timeframes)
-            msg = f"Unadjusted delisted archives exist for {allowed} "
-            f"only;requested {rejected}."
-            raise ValueError(msg)
-
 
 @dataclass(frozen=True)
 class FuturesBundleConfig(BundleConfig):
