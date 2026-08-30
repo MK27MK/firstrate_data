@@ -62,7 +62,7 @@ class BarsRequest:
         adjustment = self.bar_type.adjustment
         if (
             adjustment is not None
-            and adjustment.is_restated
+            and adjustment.changes_past
             and self.period is not Period.FULL
         ):
             msg = (
@@ -287,9 +287,4 @@ class MetafileRequest:
             "metafile_type": self.metafile_type.value,
         }
 
-
-# every request a sweep can fetch and then file, whichever table it lands in.
-# A metafile is wider than BarsRequest: it replaces a table of its own
-# rather than joining the bars tree. The same workers fetch it over the
-# same wire, though, so the download side has no reason to tell them apart.
 type IngestibleRequest = BarsRequest | MetafileRequest
