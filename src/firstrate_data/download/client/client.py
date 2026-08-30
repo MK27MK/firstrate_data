@@ -44,14 +44,10 @@ class Client(ABC):
         )
 
     @classmethod
-    def from_env(
-        cls,
-        max_workers: int = DEFAULT_MAX_WORKERS,
-        spool_dir: Path | None = None,
-    ) -> Self:
+    def from_env(cls, max_workers: int = DEFAULT_MAX_WORKERS) -> Self:
         return cls(
             config.firstrate_user_id(),
-            Store.from_env(spool_dir),
+            Store.from_env(),
             config.base_url(),
             max_workers,
         )
@@ -87,13 +83,15 @@ class Client(ABC):
         return self.store.ingest(self._fetch(request), request)
 
     # ------------------------------------------------------------------
-    # text endpoints - they dont ingest anything.
+    # text endpoints
     # ------------------------------------------------------------------
 
-    def get_ticker_listing(self) -> list[TickerListing]:
-        return TickerListing.from_csv(
-            self._fetcher.read(TickerListingRequest(self._asset_type))
+    def download_ticker_listing(self) -> list[TickerListing]:
+        listing = TickerListing.from_csv(
+            self._fetcher.read(TickerListingRequest(self._asset_type)),
         )
+        self.store.ingest_ticker_listing(self._asset_type, listing)
+        return listing
 
     def get_last_update(
         self,

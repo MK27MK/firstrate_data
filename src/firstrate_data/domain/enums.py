@@ -23,14 +23,8 @@ EQUITIES = (AssetType.STOCK, AssetType.ETF)
 
 
 class Dataset(StrEnum):
-    LISTED = auto()
-    DELISTED = auto()
     CONTINUOUS = auto()
     CONTRACT = auto()
-
-    @classmethod
-    def default_from_asset_type(cls, asset_type: AssetType) -> Dataset:
-        return cls.CONTINUOUS if asset_type is AssetType.FUTURES else cls.LISTED
 
 
 # adjustments ----------------------------------------------------------
