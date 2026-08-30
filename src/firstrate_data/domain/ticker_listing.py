@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Self
 
+_DELISTED_SUFFIX = "-DELISTED"
+
 
 @dataclass(frozen=True, slots=True)
 class TickerListing:
@@ -13,6 +15,7 @@ class TickerListing:
     full_name: str
     start_date: date
     end_date: date
+    is_delisted: bool
 
     @classmethod
     def from_csv(cls, csv_body: str) -> list[Self]:
@@ -24,9 +27,6 @@ class TickerListing:
             msg = f"ticker_listing answered with no rows: {csv_body}"
             raise ValueError(msg)
         return listed_tickers
-
-    def is_delisted(self) -> bool:
-        return self.ticker.endswith("-DELISTED")
 
     # ------------------------------------------------------------------
     # helpers
@@ -48,14 +48,16 @@ class TickerListing:
         # from both ends rather than by position: an unquoted comma in a name
         # ("Dow Jones Industrial Average, Total Return") splits into extra fields.
         # Those fields belong to the name.
-        ticker, *full_name, start_date, end_date = row
-        # strip the name whole rather than field by field: the space after the
-        # comma in "S&P 500, Total Return" belongs to the name
+        symbol, *full_name, start_date, end_date = row
+        is_delisted = symbol.endswith(_DELISTED_SUFFIX)
         return cls(
-            ticker,
+            symbol.removesuffix(_DELISTED_SUFFIX),
+            # strip the name whole rather than field by field: the space after
+            # the comma in "S&P 500, Total Return" belongs to the name
             ",".join(full_name).strip(),
             cls._listing_date_from_str(start_date.strip(), row),
             cls._listing_date_from_str(end_date.strip(), row),
+            is_delisted,
         )
 
     @staticmethod

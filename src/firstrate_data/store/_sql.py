@@ -10,7 +10,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from firstrate_data.domain import AssetType, BarType, Dataset, OtherData, Timeframe
+from firstrate_data.domain import AssetType, BarType, OtherData, Timeframe
 
 # Where ``store_rejects`` puts the lines it couldn't parse. DuckDB creates both
 # as temp tables on the first scan that rejects anything, then *appends* to
@@ -50,6 +50,14 @@ OTHER_DATA_SCHEMA: dict[OtherData, dict[str, str]] = {
 # payloads (``AAPL_divs.txt``) and leaves the splits ones bare
 # (``AAPL.txt``). The suffix isn't part of the ticker.
 OTHER_DATA_SUFFIX: dict[OtherData, str] = {OtherData.DIVIDENDS: "_divs"}
+
+TICKER_LISTING_SCHEMA: dict[str, str] = {
+    "ticker": "VARCHAR",
+    "full_name": "VARCHAR",
+    "start_date": "DATE",
+    "end_date": "DATE",
+    "is_delisted": "BOOLEAN",
+}
 
 # The six columns every bar has, typed as the parquet tree holds them.
 # ``open_interest`` is NULL where the source omits it rather than absent. A

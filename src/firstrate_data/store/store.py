@@ -94,6 +94,29 @@ class Ingested:
         return sum(lines for _, lines in self.damaged)
 
 
+class OverlappingBarsError(ValueError):
+    def __init__(
+        self,
+        bar_type: BarType,
+        collisions: Iterable[tuple[TickerSpan, TickerSpan]],
+    ) -> None:
+        self.bar_type = bar_type
+        self.collisions = tuple(collisions)
+
+        collisions_named = 5
+        named = "; ".join(
+            f"{held.ticker} holds {held.first_ts:%Y-%m-%d}..{held.last_ts:%Y-%m-%d}, "
+            f"archive carries {arriving.first_ts:%Y-%m-%d}..{arriving.last_ts:%Y-%m-%d}"
+            for held, arriving in self.collisions[:collisions_named]
+        )
+        unnamed = len(self.collisions) - collisions_named
+        rest = f", and {unnamed} more" if unnamed > 0 else ""
+        super().__init__(
+            f"{len(self.collisions)} tickers already hold bars this archive "
+            f"carries again: {named}{rest}. Nothing was filed.",
+        )
+
+
 class Store:
     """_summary_.
 
@@ -111,6 +134,7 @@ class Store:
 
         self._connection = duckdb.connect()
         self._configure(self._connection)
+        self._catalog = Catalog(self._connection, self._directory / "catalog.parquet")
 
     def _configure(self, connection: duckdb.DuckDBPyConnection) -> None:
         # DuckDB spills to `.tmp` in the working directory by default, which is
