@@ -27,12 +27,10 @@ from firstrate_data.domain import (
     TradingHours,
     Unadjusted,
 )
-from firstrate_data.download.client.file_fetcher import FetchedFile
 from firstrate_data.download.requests import (
     BarsRequest,
-    DelistedBarsRequest,
-    IngestibleRequest,
     OtherDataRequest,
+    Request,
 )
 from firstrate_data.store import _deflate64, _sql
 from firstrate_data.store._catalog import Catalog, TickerSpan
@@ -65,22 +63,24 @@ class Ingested:
     rows: int
 
 
-class OverlappingBarsError(ValueError):
+class ConflictingBarsError(ValueError):
+    """An archive's bars are not an update of the bars already filed for a ticker."""
+
     def __init__(
         self,
         bar_type: BarType,
-        collisions: Iterable[tuple[TickerSpan, TickerSpan]],
+        conflicts: Iterable[tuple[TickerSpan, TickerSpan]],
     ) -> None:
         self.bar_type = bar_type
-        self.collisions = tuple(collisions)
+        self.conflicts = tuple(conflicts)
         named = "; ".join(
-            f"{held.ticker} holds bars through {held.last_ts:%Y-%m-%d}, "
-            f"archive carries them from {arriving.first_ts:%Y-%m-%d}"
-            for held, arriving in self.collisions
+            f"{held.ticker} holds {held.first_ts:%Y-%m-%d}..{held.last_ts:%Y-%m-%d}, "
+            f"archive carries {arriving.first_ts:%Y-%m-%d}..{arriving.last_ts:%Y-%m-%d}"
+            for held, arriving in self.conflicts
         )
         super().__init__(
-            f"{len(self.collisions)} tickers already hold bars this archive "
-            f"carries again: {named}. Nothing was filed.",
+            f"{len(self.conflicts)} tickers hold bars this archive neither starts "
+            f"with nor reaches past: {named}. Nothing was filed.",
         )
 
 
@@ -98,6 +98,9 @@ class Store:
         self._directory = directory / "firstrate_data"
         self._bars_directory = self._directory / "bars"
         self._spool = self._directory / "spool"
+
+        self._bars_directory.mkdir(parents=True, exist_ok=True)
+        self._spool.mkdir(parents=True, exist_ok=True)
 
         self._connection = duckdb.connect()
         self._configure(self._connection)
@@ -147,40 +150,26 @@ class Store:
 
     @property
     def spool(self) -> Path:
-        self._spool.mkdir(parents=True, exist_ok=True)
         return self._spool
 
     # ------------------------------------------------------------------
     # writing methods
     # ------------------------------------------------------------------
 
-    def ingest(self, file: FetchedFile, request: IngestibleRequest) -> Ingested:
+    def write(self, file: Path, request: Request) -> Ingested:
         try:
             if isinstance(request, OtherDataRequest):
-                return self._ingest_other_data(file.path, request.other_data)
-            return self._ingest_bars(file.path, request)
+                return self._write_other_data(file, request.other_data)
+            return self._write_bars(file, request)
         finally:
-            # parquet is the only copy, and that goes for the vendor's zip on
-            # its way in as much as for the CSV it unzips to
-            file.path.unlink(missing_ok=True)
+            # parquet is the only copy
+            file.unlink(missing_ok=True)
 
-    def ingest_ticker_listing(
+    def write_ticker_listing(
         self,
         asset_type: AssetType,
         listing: Iterable[TickerListing],
     ) -> int:
-        """Replace the stored ticker listing of one asset type; returns its rows.
-
-        One file per asset type, under that asset type's level of the tree, so
-        writing one leaves the others alone. Replaced rather than merged: the
-        vendor serves its whole universe for an asset type each time, and the
-        rows carry no key to merge on.
-
-        The rows are stored as served. The vendor lists 169 stock symbols
-        twice, and leaves the name empty on 14% of the rows, so the name is a
-        label and not a key -- collapsing the rows would be the store guessing
-        on the reader's behalf. Read them back with ``ticker_listing``.
-        """
         table = self._ticker_listing_table(asset_type)
         staged = table.stage(
             (
@@ -199,6 +188,64 @@ class Store:
         table.rewrite(f"SELECT * FROM {staged}")  # noqa: S608
         return int(table.relation().shape[0])
 
+    def _write_bars(self, archive: Path, request: BarsRequest) -> Ingested:
+        bar_type = request.bar_type
+
+        # minted once for the whole archive, not per batch: the point of the id
+        # is that one glob afterwards finds everything this archive wrote
+        ingest = _sql.ingest_id()
+
+        with self._unzipped(archive) as staging:
+            payloads = self._payloads_by_ticker(staging)
+            held = self._catalog.spans(bar_type, payloads)
+            columns_in_payload = _sql.payload_columns(
+                payload for files in payloads.values() for payload in files
+            )
+
+            staged_tree = staging / "bars"
+            rows = 0
+            for batch in batched(payloads.items(), _TICKERS_PER_COPY, strict=False):
+                rows += self._copy_batch(
+                    bar_type,
+                    staged_tree,
+                    payloads=dict(batch),
+                    columns_in_payload=columns_in_payload,
+                    ingest=ingest,
+                )
+
+            arriving = self._written_spans(staged_tree, bar_type, ingest)
+            self._file_over(bar_type, held, arriving, staged_tree)
+
+        return Ingested(len(payloads), rows)
+
+    def _write_other_data(self, content: Path, other_data: OtherData) -> Ingested:
+        """Replace one metafile table -- splits, dividends, or the continuous audit.
+
+        Replaced whole rather than reconciled: a metafile is small, the vendor
+        serves the entire history each time, and it carries no key to merge on.
+        ``content`` is an archive of one headerless CSV per ticker, the only
+        shape observed, or a bare CSV, which the docs leave open. Both are
+        accepted. ``Ingested.tickers`` is None -- a metafile has no ticker
+        dimension in the layout.
+        """
+        target = self._other_data_path(other_data)
+
+        with self._other_data_payloads(content, other_data) as (
+            payloads,
+            per_ticker,
+        ):
+            # written beside the target and swapped in, so a reader either sees
+            # the previous table whole or the new one, never a half-written file
+            staged = target.with_name(f"{target.name}.partial")
+            select = _sql.other_data_select(payloads, other_data, per_ticker)
+            rows = self._execute_counting(f"""
+                COPY ({select})
+                TO {_sql.sql_literal(str(staged))} (FORMAT PARQUET, COMPRESSION ZSTD)
+                """)
+            staged.replace(target)
+
+        return Ingested(None, rows)
+    
     # ------------------------------------------------------------------
     # reading methods
     # ------------------------------------------------------------------
@@ -215,11 +262,9 @@ class Store:
     ) -> duckdb.DuckDBPyRelation:
         """Stock bars, as a lazy relation.
 
-        The vendor's listed and delisted bundles are two places it files one
-        symbol, and the store files both under the bare symbol, so this
-        answers with every bar it holds for the ticker.
-        Which company held the symbol over which days is
-        ``ticker_listing(ticker=...)``'s to say.
+        A delisted symbol keeps the vendor's ``-DELISTED`` suffix, so
+        ``ticker="UTRS"`` and ``ticker="UTRS-DELISTED"`` are two instruments
+        that happened to share a symbol, each read on its own.
         """
         return self._read(
             BarType(AssetType.STOCK, timeframe=timeframe, adjustment=adjustment),
@@ -419,87 +464,14 @@ class Store:
     # ingest internals
     # ------------------------------------------------------------------
 
-    def _ingest_bars(self, archive: Path, request: BarsRequest) -> Ingested:
-        """File one bars archive into the tree, and keep nothing else.
-
-        The archive is unzipped inside the store, read, and deleted. Whether
-        it replaces the bars it names is the source's to say: a replacing
-        fetch carries the whole history of every ticker it names, so what the
-        store holds for those tickers goes first. Any other fetch adds to it,
-        and bars landing on a span already filed are a collision rather than
-        an overlap to trim -- ``OverlappingBarsError``, with nothing filed.
-        """
-        bar_type = request.bar_type
-        suffixed = isinstance(request, DelistedBarsRequest)
-
-        # minted once for the whole archive, not per batch: the point of the id
-        # is that one glob afterwards finds everything this archive wrote
-        ingest = _sql.ingest_id()
-
-        with self._unzipped(archive) as staging:
-            payloads = self._payloads_by_ticker(staging, strip_delisted_suffix=suffixed)
-            if request.must_replace_existing_bars:
-                self._remove_existing_bars(bar_type, payloads)
-                held: dict[str, TickerSpan] = {}
-            else:
-                held = self._catalog.spans(bar_type, payloads)
-            columns_in_payload = _sql.payload_columns(
-                payload for files in payloads.values() for payload in files
-            )
-
-            rows = 0
-            for batch in batched(payloads.items(), _TICKERS_PER_COPY, strict=False):
-                rows += self._copy_batch(
-                    bar_type,
-                    payloads=dict(batch),
-                    columns_in_payload=columns_in_payload,
-                    ingest=ingest,
-                    strip_delisted_suffix=suffixed,
-                )
-
-        self._file_over(bar_type, held, self._written_spans(bar_type, ingest), ingest)
-        return Ingested(len(payloads), rows)
-
-    def _ingest_other_data(self, content: Path, other_data: OtherData) -> Ingested:
-        """Replace one metafile table -- splits, dividends, or the continuous audit.
-
-        Replaced whole rather than reconciled: a metafile is small, the vendor
-        serves the entire history each time, and it carries no key to merge on.
-        ``content`` is an archive of one headerless CSV per ticker, the only
-        shape observed, or a bare CSV, which the docs leave open. Both are
-        accepted. ``Ingested.tickers`` is None -- a metafile has no ticker
-        dimension in the layout.
-        """
-        target = self._other_data_path(other_data)
-
-        with self._other_data_payloads(content, other_data) as (
-            payloads,
-            per_ticker,
-        ):
-            # written beside the target and swapped in, so a reader either sees
-            # the previous table whole or the new one, never a half-written file
-            staged = target.with_name(f"{target.name}.partial")
-            select = _sql.other_data_select(payloads, other_data, per_ticker)
-            rows = self._execute_counting(f"""
-                COPY ({select})
-                TO {_sql.sql_literal(str(staged))} (FORMAT PARQUET, COMPRESSION ZSTD)
-                """)
-            staged.replace(target)
-
-        return Ingested(None, rows)
 
     @contextmanager
     def _unzipped(self, archive: Path) -> Generator[Path]:
-        """The archive's payloads on disk, for as long as the ingest needs them.
-
-        Inside the store, not the system temp: rarely the same filesystem, and
-        an unzipped archive runs to tens of gigabytes.
-        """
         staging = Path(mkdtemp(dir=self._directory, prefix=".ingest-"))
         try:
             # the vendor's larger archives are Deflate64, which zipfile declines
             # to decode until this has run
-            _deflate64.install()
+            _deflate64.install() # TODO try removing this bs
             with zipfile.ZipFile(archive) as opened:
                 opened.extractall(staging)
             yield staging
@@ -509,19 +481,11 @@ class Store:
             # delete. A failed ingest costs a re-unzip, not a re-fetch.
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _payloads_by_ticker(
-        self,
-        directory: Path,
-        *,
-        strip_delisted_suffix: bool,
-    ) -> dict[str, list[Path]]:
+    def _payloads_by_ticker(self, directory: Path) -> dict[str, list[Path]]:
         """Every payload one archive unzipped to, grouped by the ticker it names."""
         grouped: defaultdict[str, list[Path]] = defaultdict(list)
         for path, ticker in self._connection.sql(
-            _sql.payload_tickers_select(
-                directory,
-                strip_delisted_suffix=strip_delisted_suffix,
-            ),
+            _sql.payload_tickers_select(directory),
         ).fetchall():
             grouped[ticker].append(Path(path))
         return dict(grouped)
@@ -529,25 +493,24 @@ class Store:
     def _copy_batch(
         self,
         bar_type: BarType,
+        destination: Path,
         *,
         payloads: dict[str, list[Path]],
         columns_in_payload: int,
         ingest: str,
-        strip_delisted_suffix: bool,
     ) -> int:
-        """Write one batch of tickers into the tree; returns rows written."""
+        """Write one batch of tickers under `destination`; returns rows written."""
         select = _sql.bars_select(
             [payload for files in payloads.values() for payload in files],
             # no ticker: one COPY writes a batch of them, and each row's is
             # read back out of the payload that carried it
             bar_type,
             columns_in_payload,
-            strip_delisted_suffix=strip_delisted_suffix,
         )
-        levels = ", ".join(bar_type.to_dict())
+        levels = ", ".join(bar_type.levels())
         return self._execute_counting(f"""
             COPY ({select})
-            TO {_sql.sql_literal(str(self._bars_directory))}
+            TO {_sql.sql_literal(str(destination))}
             (FORMAT PARQUET,
              COMPRESSION ZSTD,
              PARTITION_BY ({levels}),
@@ -555,13 +518,18 @@ class Store:
              APPEND)
             """)
 
-    def _written_spans(self, bar_type: BarType, ingest: str) -> dict[str, TickerSpan]:
-        """What one ingest put in the tree, per ticker, off the files it wrote.
+    def _written_spans(
+        self,
+        root: Path,
+        bar_type: BarType,
+        ingest: str,
+    ) -> dict[str, TickerSpan]:
+        """What one ingest wrote under `root`, per ticker, off the files' footers.
 
         Scoped to that ingest's own files by the id stamped on their names, so
         the cost is the archive's and not the store's.
         """
-        files = self._ingest_files(bar_type, ingest)
+        files = self._ingest_files(root, bar_type, ingest)
         if not files:
             return {}
         ticker = _sql.hive_level_expression("file", "ticker")
@@ -576,60 +544,73 @@ class Store:
             for named, first_ts, last_ts, rows in spans
         }
 
-    def _remove_existing_bars(self, bar_type: BarType, tickers: Iterable[str]) -> None:
-        """Unlink the tree's bars for `tickers`, which the archive replaces whole."""
-        for ticker in tickers:
-            directory = Path(
-                self._get_bar_path(bar_type.from_ticker(ticker), files_regex=None),
-            )
-            if directory.exists():
-                shutil.rmtree(directory)
-
     def _file_over(
         self,
         bar_type: BarType,
         held: dict[str, TickerSpan],
         arriving: dict[str, TickerSpan],
-        ingest: str,
+        staged_tree: Path,
     ) -> None:
-        """Record what one ingest filed, or refuse it for landing on filed bars.
+        """Move a staged ingest into the tree, or refuse it before it gets there.
 
         Raises
         ------
-        OverlappingBarsError
-            If any ticker's arriving bars reach back into bars already filed.
+        ConflictingBarsError
+            If any ticker's arriving bars are not an update of the filed ones.
+            The tree and the catalog are untouched.
 
         """
-        collisions = [
+        conflicts = [
             (held[ticker], span)
             for ticker, span in sorted(arriving.items())
-            if ticker in held and span.first_ts <= held[ticker].last_ts
+            if ticker in held and not _updates(held[ticker], span)
         ]
-        if collisions:
-            for file in self._ingest_files(bar_type, ingest):
-                Path(file).unlink(missing_ok=True)
-            raise OverlappingBarsError(bar_type, collisions)
+        if conflicts:
+            raise ConflictingBarsError(bar_type, conflicts)
+
+        # the ticker's held bars go only once their replacement is in the tree,
+        # and only the files this ingest did not write: an update carries the
+        # whole history again, so what it lands beside is the previous copy of it
+        landed = set(self._move_into_tree(staged_tree))
+        for ticker in arriving:
+            if ticker in held:
+                _unlink(
+                    file
+                    for file in self._ticker_files(bar_type, ticker)
+                    if file not in landed
+                )
 
         self._catalog.record(
             bar_type,
-            [
-                span
-                if ticker not in held
-                else TickerSpan(
-                    ticker,
-                    held[ticker].first_ts,
-                    span.last_ts,
-                    held[ticker].rows + span.rows,
-                )
-                for ticker, span in sorted(arriving.items())
-            ],
+            [span for _, span in sorted(arriving.items())],
         )
 
-    def _ingest_files(self, bar_type: BarType, ingest: str) -> list[str]:
+    def _move_into_tree(self, staged_tree: Path) -> list[str]:
+        """Move a validated ingest's parquet files into the tree, level for level.
+
+        A rename rather than a copy: the staging directory lives inside the
+        store, so the bars never cross a filesystem however large the archive.
+        """
+        landed = []
+        for staged in sorted(staged_tree.rglob(PARQUET_FILES)):
+            landing = self._bars_directory / staged.relative_to(staged_tree)
+            landing.parent.mkdir(parents=True, exist_ok=True)
+            staged.replace(landing)
+            landed.append(str(landing))
+        return landed
+
+    def _ticker_files(self, bar_type: BarType, ticker: str) -> list[str]:
+        """Every parquet file the tree holds for one ticker under `bar_type`."""
+        # `pattern` is a full glob string built by _get_bar_path(), not
+        # decomposable into Path(base).glob(pattern) at this call site
+        return sorted(iglob(self._get_bar_path(bar_type.from_ticker(ticker))))  # noqa: PTH207
+
+    def _ingest_files(self, root: Path, bar_type: BarType, ingest: str) -> list[str]:
         """The parquet files one ingest wrote, by the id stamped on their names."""
         pattern = self._get_bar_path(
             bar_type,
             files_regex=_sql.parquet_file_ingest_id_glob(ingest),
+            root=root,
         )
         # `pattern` is a full glob string built by _get_bar_path(), not
         # decomposable into Path(base).glob(pattern) at this call site
@@ -760,22 +741,36 @@ class Store:
         )
 
     def _get_bar_path(
-        self, bar_type: BarType, files_regex: str | None = PARQUET_FILES
+        self,
+        bar_type: BarType,
+        files_regex: str = PARQUET_FILES,
+        root: Path | None = None,
     ) -> str:
-        """The path, or glob, the tree files `bar_type` under."""
-        stated = bar_type.to_dict()
+        """The glob `bar_type`'s parquet files sit under, in the tree or a staged one.
 
-        if files_regex is None and None in stated.values():
-            unset = [key for key, value in stated.items() if value is None]
-            msg = f"bar type names no {', '.join(unset)}"
-            raise ValueError(msg)
-
+        `root` names a staged tree an ingest is still being validated in.
+        Absent, it is the store's own.
+        """
         levels = (
-            f"{key}={'*' if value is None else value}" for key, value in stated.items()
+            f"{key}={'*' if value is None else value}"
+            for key, value in bar_type.levels().items()
         )
-        directory = self._bars_directory.joinpath(*levels)
-        path = directory if files_regex is None else directory / files_regex
+        path = (root or self._bars_directory).joinpath(*levels) / files_regex
         # forward slashes, which DuckDB's glob and Python's both read on every
         # platform. A backslash is the pattern language's escape character, so a
         # native Windows path would read ``\[0-9]`` as the literal ``[0-9]``.
         return path.as_posix()
+
+
+def _updates(held: TickerSpan, arriving: TickerSpan) -> bool:
+    """Whether `arriving` is the same history as `held`, downloaded with more of it.
+
+    The same first bar and a later last one. A different start is a different
+    history under one name, and no bars past the last held are nothing to file.
+    """
+    return arriving.first_ts == held.first_ts and arriving.last_ts > held.last_ts
+
+
+def _unlink(files: Iterable[str]) -> None:
+    for file in files:
+        Path(file).unlink(missing_ok=True)

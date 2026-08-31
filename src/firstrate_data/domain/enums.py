@@ -19,8 +19,6 @@ class AssetType(StrEnum):
         return "America/New_York"
 
 
-EQUITIES = (AssetType.STOCK, AssetType.ETF)
-
 
 # adjustments ----------------------------------------------------------
 

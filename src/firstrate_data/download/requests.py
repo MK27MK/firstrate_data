@@ -2,7 +2,6 @@ from dataclasses import dataclass, field, replace
 from typing import ClassVar, Literal, Protocol
 
 from firstrate_data.domain import (
-    EQUITIES,
     AssetType,
     BarType,
     ContractFiles,
@@ -35,24 +34,19 @@ class BarsRequest:
     period: Period | None = None
     ticker_range: str | None = field(default=None, kw_only=True)
 
-    # __post_init__ checks what the vendor will honour, rather than each
-    # loader's plan_* method. A rule that depends on the caller routing
-    # through the right method stops running the moment someone adds a
-    # fourth asset type. No path can send an unconstructible request.
     def __post_init__(self) -> None:
-        asset_type = self._stated(self.bar_type.asset_type, "asset type")
-        self._stated(self.period, "period")
+        asset_type = self._raise_if_none(self.bar_type.asset_type, "asset type")
+        self._raise_if_none(self.period, "period")
 
-        if asset_type in EQUITIES:
+        equities = (AssetType.STOCK, AssetType.ETF)
+        if asset_type in equities:
             self._check_equities_offer()
         elif self.ticker_range is not None:
             msg = (
                 f"ticker_range is equities-only: a {asset_type.value} "
                 "full archive is served whole"
             )
-            raise NotOfferedError(
-                msg,
-            )
+            raise NotOfferedError(msg)
 
         # refused before the request goes out rather than at ingest: a restated
         # increment is unusable no matter how long it took to arrive, and this
@@ -65,80 +59,22 @@ class BarsRequest:
         ):
             msg = (
                 f"{adjustment.value} is restated: the vendor rewrites "
-                "its history backwards when an action lands, so appending a "
-                f"{self._stated(self.period, 'period').value} would splice two "
+                "its history backwards when there's a split or dividend, so appending a "
+                f"{self._raise_if_none(self.period, 'period').value} would splice two "
                 "adjustment bases together. "
                 "Re-fetch it with period=full instead."
             )
-            raise NotOfferedError(
-                msg,
-            )
-
-    def _stated[Named](self, value: Named | None, what: str) -> Named:
-        """``value``, or a refusal naming what this endpoint wasn't told.
-
-        Raises
-        ------
-        NotOfferedError
-            If ``value`` is None.
-
-        """
-        if value is None:
-            msg = f"{self.endpoint} is served per {what}: name one"
             raise NotOfferedError(msg)
-        return value
-
-    def _check_equities_offer(self) -> None:
-        """Check the rules only stocks and ETFs have, and normalise ticker_range."""
-        self._check_unadjusted_timeframe()
-        self._check_and_normalise_ticker_range()
-
-    def _check_unadjusted_timeframe(self) -> None:
-        # the delisted endpoint serves UNADJUSTED on 1min *only* -- same Enum,
-        # narrower rule, so each endpoint guards its own
-        if self.bar_type.adjustment is EquitiesAdjustment.UNADJUSTED and self._stated(
-            self.bar_type.timeframe, "timeframe"
-        ) not in (
-            Timeframe.MIN_1,
-            Timeframe.DAY_1,
-        ):
-            msg = "UNADJUSTED data is only available in the 1min and 1day timeframes"
-            raise NotOfferedError(
-                msg,
-            )
-
-    def _check_and_normalise_ticker_range(self) -> None:
-        if self.period is Period.FULL and self.ticker_range is None:
-            msg = "ticker_range (A-Z) is required when period=full"
-            raise NotOfferedError(msg)
-        if self.ticker_range is not None:
-            if self.period is not Period.FULL:
-                msg = "ticker_range can only be used when period=full"
-                raise NotOfferedError(msg)
-            letter = self.ticker_range.upper()
-            if len(letter) != 1 or not letter.isalpha():
-                msg = "ticker_range must be a single letter A-Z"
-                raise NotOfferedError(msg)
-            # the supported way to normalise a field of a frozen dataclass
-            object.__setattr__(self, "ticker_range", letter)
-
-    @property
-    def must_replace_existing_bars(self) -> bool:
-        """Whether this archive is the whole history of every ticker it names.
-
-        A ``full`` is, so it supersedes what its bar types hold rather than
-        extending them. Every shorter period starts from its own beginning,
-        so it carries only the tail of a history the store already has.
-        """
-        return self.period is Period.FULL
 
     def to_params(self) -> dict[str, str]:
-        asset_type = self._stated(self.bar_type.asset_type, "asset type")
+        asset_type = self._raise_if_none(self.bar_type.asset_type, "asset type")
         params = {
             "type": asset_type.value,
             # __post_init__ states period before anything can send this
-            "period": self._stated(self.period, "period").value,
-            "timeframe": self._stated(self.bar_type.timeframe, "timeframe").value,
+            "period": self._raise_if_none(self.period, "period").value,
+            "timeframe": self._raise_if_none(
+                self.bar_type.timeframe, "timeframe"
+            ).value,
         }
 
         # the index docs page lists no adjustment at all, and sending one the
@@ -154,6 +90,46 @@ class BarsRequest:
             params["ticker_range"] = self.ticker_range
 
         return params
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+
+    def _raise_if_none[Named](self, value: Named | None, what: str) -> Named:
+        if value is None:
+            msg = f"{self.endpoint} is served per {what}: name one"
+            raise NotOfferedError(msg)
+        return value
+
+    def _check_equities_offer(self) -> None:
+        self._check_unadjusted_timeframe()
+        self._check_and_normalise_ticker_range()
+
+    def _check_unadjusted_timeframe(self) -> None:
+        # unadjusted data for ETFs and stock is only available in the 1min and daily tf
+        if self.bar_type.adjustment is not EquitiesAdjustment.UNADJUSTED:
+            return
+
+        tf = self._raise_if_none(self.bar_type.timeframe, "timeframe")
+
+        if tf not in (Timeframe.MIN_1, Timeframe.DAY_1):
+            msg = "UNADJUSTED data is only available in the 1min and 1day timeframes"
+            raise NotOfferedError(msg)
+
+    def _check_and_normalise_ticker_range(self) -> None:
+        if self.period is Period.FULL and self.ticker_range is None:
+            msg = "ticker_range (A-Z) is required when period=full"
+            raise NotOfferedError(msg)
+        if self.ticker_range is not None:
+            if self.period is not Period.FULL:
+                msg = "ticker_range can only be used when period=full"
+                raise NotOfferedError(msg)
+            letter = self.ticker_range.upper()
+            if len(letter) != 1 or not letter.isalpha():
+                msg = "ticker_range must be a single letter A-Z"
+                raise NotOfferedError(msg)
+            # the supported way to normalise a field of a frozen dataclass
+            object.__setattr__(self, "ticker_range", letter)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,18 +154,10 @@ class DelistedBarsRequest(BarsRequest):
         if self.bar_type.adjustment is not EquitiesAdjustment.UNADJUSTED:
             return
 
-        timeframe = self._stated(self.bar_type.timeframe, "timeframe")
+        timeframe = self._raise_if_none(self.bar_type.timeframe, "timeframe")
         if timeframe not in (Timeframe.MIN_1, Timeframe.DAY_1):
             msg = "UNADJUSTED delisted data is only available in the 1min and daily timeframe"
             raise NotOfferedError(msg)
-
-    @property
-    def must_replace_existing_bars(self) -> bool:
-        # every delisted payload is one ticker's entire history, whichever
-        # selector asked for it, so a delisted fetch replaces its bar types.
-        # That keeps `update=week` from double-counting with `update=year`,
-        # since `update=week` is a strict subset of it
-        return True
 
     @property
     def kind(self) -> Literal["archive", "update"]:
@@ -201,8 +169,12 @@ class DelistedBarsRequest(BarsRequest):
 
         return {
             selector_param: self.selector.value,
-            "timeframe": self._stated(self.bar_type.timeframe, "timeframe").value,
-            "adjustment": self._stated(self.bar_type.adjustment, "adjustment").value,
+            "timeframe": self._raise_if_none(
+                self.bar_type.timeframe, "timeframe"
+            ).value,
+            "adjustment": self._raise_if_none(
+                self.bar_type.adjustment, "adjustment"
+            ).value,
         }
 
 
@@ -220,18 +192,12 @@ class ContractBarsRequest(BarsRequest):
             replace(self.bar_type, adjustment=Unadjusted.UNADJUSTED),
         )
 
-    @property
-    def must_replace_existing_bars(self) -> bool:
-        # every payload is one contract's entire life, both halves alike: the
-        # archive's contracts stopped trading before 2026 and the update's are
-        # re-served whole each day. The two name different contracts, so
-        # replacing one never drops the other's bar types
-        return True
-
     def to_params(self) -> dict[str, str]:
         return {
             "contract_files": self.contract_files.value,
-            "timeframe": self._stated(self.bar_type.timeframe, "timeframe").value,
+            "timeframe": self._raise_if_none(
+                self.bar_type.timeframe, "timeframe"
+            ).value,
         }
 
 
@@ -275,6 +241,3 @@ class OtherDataRequest:
             "type": self.asset_type.value,
             "other_data": self.other_data.value,
         }
-
-
-type IngestibleRequest = BarsRequest | OtherDataRequest

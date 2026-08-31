@@ -111,20 +111,17 @@ def sql_list(values: Iterable[str]) -> str:
     return f"[{', '.join(sql_literal(value) for value in values)}]"
 
 
-def ticker_expression(column: str, *, strip_delisted_suffix: bool) -> str:
+def ticker_expression(column: str) -> str:
     """Build the SQL expression extracting a payload filename's ticker in `column`.
 
     The vendor names payloads ``{TICKER}_{period}_{timeframe}_{adjustment}.txt``,
     and the ticker is the one field that never contains an underscore, so this
-    reads from the left. The delisted endpoint suffixes the ticker
-    (``OLPX-DELISTED_...``), naming the bundle it served the payload out of
-    rather than the instrument. The store files a stock under its bare symbol
-    whichever bundle carried it, so that suffix comes off here.
+    reads from the left. The delisted endpoint's ``-DELISTED`` suffix
+    (``OLPX-DELISTED_...``) is part of the ticker the store files under: a
+    recycled symbol is two instruments, and the suffix is what keeps their bars
+    apart.
     """
-    ticker = f"regexp_extract(parse_filename({column}), '^([^_]+)_', 1)"
-    if strip_delisted_suffix:
-        return f"regexp_replace({ticker}, '-DELISTED$', '')"
-    return ticker
+    return f"regexp_extract(parse_filename({column}), '^([^_]+)_', 1)"
 
 
 def hive_level_expression(column: str, level: str) -> str:
@@ -137,7 +134,7 @@ def hive_level_expression(column: str, level: str) -> str:
     return f"regexp_extract({column}, '{level}=([^/\\\\]+)', 1)"
 
 
-def payload_tickers_select(directory: Path, *, strip_delisted_suffix: bool) -> str:
+def payload_tickers_select(directory: Path) -> str:
     """Build a SELECT of ``(file, ticker)`` for every payload one archive unzipped to.
 
     Via DuckDB's ``glob``, so the filename-to-ticker rule exists once, in
@@ -147,7 +144,7 @@ def payload_tickers_select(directory: Path, *, strip_delisted_suffix: bool) -> s
     # pattern and SIDECAR_PREFIX go through sql_literal(), and
     # ticker_expression() only assembles internal SQL fragments. Neither comes
     # from user input.
-    ticker = ticker_expression("file", strip_delisted_suffix=strip_delisted_suffix)
+    ticker = ticker_expression("file")
     return (
         f"SELECT file, {ticker} AS ticker "  # noqa: S608
         f"FROM glob({pattern}) "
@@ -161,8 +158,6 @@ def bars_select(
     payloads: Iterable[Path],
     bar_type: BarType,
     columns_in_payload: int,
-    *,
-    strip_delisted_suffix: bool,
 ) -> str:
     """Build a SELECT reading unzipped ``.txt`` payloads as the store's schema.
 
@@ -205,12 +200,12 @@ def bars_select(
     )
     files = sql_list(str(payload) for payload in payloads)
     stamped = sql_literal(asset_type.timezone())
-    ticker = ticker_expression("filename", strip_delisted_suffix=strip_delisted_suffix)
+    ticker = ticker_expression("filename")
     # the tree is the only record of these -- they're nowhere in the payload,
     # so a level this stops selecting here would read back as NULL
     levels = ",\n            ".join(
         f"{sql_literal(value)} AS {key}"
-        for key, value in bar_type.to_dict(drop_none=True).items()
+        for key, value in bar_type.stated_levels().items()
     )
 
     # stamped, levels and files go through sql_literal() and sql_list().

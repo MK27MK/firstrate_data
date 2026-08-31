@@ -36,5 +36,9 @@ max-complexity = 5
 "tests/*" = [
     "S101", # assert - we need assertions in tests
     "SLF001", # private-member-access https://docs.astral.sh/ruff/rules/private-member-access/
-    "PLR2004" # magic-value-comparison
+    "PLR2004", # magic-value-comparison
+    "INP001", # run as a script, not imported as a package
+    "T201", # a self-check reports to the terminal
+    "EM101",
+    "TRY003",
 ]

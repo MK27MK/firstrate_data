@@ -1,5 +1,5 @@
 from dataclasses import dataclass, fields, replace
-from typing import Literal, Self, overload
+from typing import Self
 
 from firstrate_data.domain.enums import Adjustment, AssetType, Timeframe
 
@@ -16,22 +16,17 @@ class BarType:
         """Return a copy of this `BarType` with `ticker` swapped in."""
         return replace(self, ticker=ticker)
 
-    @overload
-    def to_dict(self, *, drop_none: Literal[True]) -> dict[str, str]: ...
-    @overload
-    def to_dict(
-        self, *, drop_none: Literal[False] = False
-    ) -> dict[str, str | None]: ...
-    def to_dict(
-        self,
-        *,
-        drop_none: bool = False,
-    ) -> dict[str, str] | dict[str, str | None]:
-        pairs = ((f.name, getattr(self, f.name)) for f in fields(self))
+    def levels(self) -> dict[str, str | None]:
+        """Every level of the tree, in the tree's order. None where unstated."""
         return {
-            name: None if value is None else str(value)
-            for name, value in pairs
-            if value is not None or not drop_none
+            f.name: None if (value := getattr(self, f.name)) is None else str(value)
+            for f in fields(self)
+        }
+
+    def stated_levels(self) -> dict[str, str]:
+        """The levels this bar type names, in the tree's order."""
+        return {
+            name: value for name, value in self.levels().items() if value is not None
         }
 
     @classmethod

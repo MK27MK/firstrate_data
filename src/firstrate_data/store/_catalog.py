@@ -118,7 +118,7 @@ class Catalog:
 
     def _stage(self, bar_type: BarType, spans: Iterable[TickerSpan]) -> str | None:
         """Load the rows of one update into the staging table, or None for no rows."""
-        levels = bar_type.from_ticker(None).to_dict()
+        levels = bar_type.from_ticker(None).levels()
         return self._table.stage(
             (
                 *(levels[level] for level in BarType.fields() if level != "ticker"),
@@ -138,6 +138,6 @@ def where_bar_type(bar_type: BarType) -> str:
     """
     tests = [
         f"{level} = {_sql.sql_literal(value)}"
-        for level, value in bar_type.to_dict(drop_none=True).items()
+        for level, value in bar_type.stated_levels().items()
     ]
     return " AND ".join(tests) or "TRUE"
