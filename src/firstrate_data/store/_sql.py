@@ -12,25 +12,6 @@ from uuid import uuid4
 
 from firstrate_data.domain import AssetType, BarType, OtherData, Timeframe
 
-# Where ``store_rejects`` puts the lines it couldn't parse. DuckDB creates both
-# as temp tables on the first scan that rejects anything, then *appends* to
-# them after that. They're a running total for the connection, not for one
-# scan -- read them and empty them per ingest, or every later ingest inherits
-# the earlier ones' damage. ``reject_errors`` holds one row per *column* that
-# failed, so a line broken in two places is two rows there.
-REJECTS_TABLE = "reject_errors"
-REJECT_SCANS_TABLE = "reject_scans"
-
-# What a quarantined line keeps. The payload is the vendor's filename, which is
-# all that survives the staging directory the ingest deletes -- and it names the
-# ticker. ``line`` is the line number within that payload.
-QUARANTINE_SCHEMA: dict[str, str] = {
-    "payload": "VARCHAR",
-    "line": "BIGINT",
-    "csv_line": "VARCHAR",
-    "errors": "VARCHAR",
-}
-
 # What a metafile's rows hold, in the vendor's order. They arrive headerless,
 # one file per ticker, so the sniffer has no schema to read. It takes the
 # first data row for a header, and every payload then declares different
@@ -80,10 +61,8 @@ SIDECAR_PREFIX = "._"
 
 # The vendor packs a plain-text README into the metafile archives
 # (``_splits_readme.txt``) explaining the row format. Read as a ticker's
-# payload, it yields no rows and two dozen rejects. A non-zero reject count is
-# the only signal the store has that ingest lost lines, and one that fires on
-# every fetch is worse than no signal at all. No ticker starts with an
-# underscore, which is what makes the prefix a safe rule.
+# payload, it aborts the scan. No ticker starts with an underscore, which is
+# what makes the prefix a safe rule.
 OTHER_DATA_NOTE_PREFIX = "_"
 
 
@@ -149,17 +128,13 @@ def ticker_expression(column: str, *, strip_delisted_suffix: bool) -> str:
 
 
 def hive_level_expression(column: str, level: str) -> str:
-    """Build the SQL expression reading one Hive level off a path in `column`.
-
-    NULL where the path carries no such level, which is how a stock's path
-    answers for ``dataset``: the tree carries that level under futures alone.
-    """
+    """Build the SQL expression reading one Hive level off a path in `column`."""
     # both separators: DuckDB reports a path on Windows with backslashes, and
     # a level bounded by ``/`` alone would swallow the rest of the path into
     # the value.
     #
     # ``level`` is one of BarType's own field names, never user input
-    return f"nullif(regexp_extract({column}, '{level}=([^/\\\\]+)', 1), '')"
+    return f"regexp_extract({column}, '{level}=([^/\\\\]+)', 1)"
 
 
 def payload_tickers_select(directory: Path, *, strip_delisted_suffix: bool) -> str:
@@ -235,8 +210,7 @@ def bars_select(
     # so a level this stops selecting here would read back as NULL
     levels = ",\n            ".join(
         f"{sql_literal(value)} AS {key}"
-        for key, value in bar_type.path_levels().items()
-        if value is not None
+        for key, value in bar_type.to_dict(drop_none=True).items()
     )
 
     # stamped, levels and files go through sql_literal() and sql_list().
@@ -259,15 +233,7 @@ def bars_select(
             columns = {{{columns}}},
             -- the vendor mixes line endings within a single payload, which the
             -- sniffer refuses to pick a dialect for; strict mode off parses them
-            strict_mode = false,
-            -- a handful of payloads in the archive have spliced bytes: a bar run
-            -- cut off mid-stamp with a bar from days later running straight into
-            -- it. Without this the first such line aborts the scan, and since a
-            -- scan covers a whole batch, one bad line costs several hundred
-            -- healthy tickers. Quarantined instead, into the reject table, which
-            -- the ingest reports -- dropping rows quietly would leave the store
-            -- looking complete while it silently was not.
-            store_rejects = true
+            strict_mode = false
         )
     """  # noqa: S608
 
@@ -297,7 +263,7 @@ def other_data_select(
     declared = OTHER_DATA_SCHEMA.get(other_data)
     if declared is None or not per_ticker:
         # sql_list() escapes files, which never comes from user input
-        return f"SELECT * FROM read_csv({files}, store_rejects = true)"  # noqa: S608
+        return f"SELECT * FROM read_csv({files})"  # noqa: S608
 
     columns = ", ".join(f"'{name}': '{kind}'" for name, kind in declared.items())
 
@@ -314,9 +280,7 @@ def other_data_select(
             filename = true,
             columns = {{{columns}}},
             -- the vendor mixes line endings here as it does in the bars
-            strict_mode = false,
-            -- quarantined rather than aborting a read that spans every ticker
-            store_rejects = true
+            strict_mode = false
         )
     """  # noqa: S608
 
@@ -349,34 +313,6 @@ def parquet_file_ingest_id_glob(ingest_id: str) -> str:
     return f"[0-9]*_{ingest_id}_*.parquet"
 
 
-def suspect_bars_where() -> str:
-    """Build the predicate matching rows that break a bar's own arithmetic.
-
-    A spliced line that happens to land on a comma parses cleanly and enters the
-    store as a bar, so nothing counts it as damaged. These four orderings and the
-    volume floor are what such a bar tends to break, and what no genuine bar can.
-    They hold for every asset type, because back-adjusting shifts prices without
-    reordering them.
-    """
-    # NULLs aren't suspect. Open_interest aside, a NULL price is the store's
-    # answer for a column the source doesn't carry, and every comparison here
-    # would swallow it into neither camp anyway
-    return """
-        high < low
-        OR high < open OR high < close
-        OR low > open OR low > close
-        OR volume < 0
-    """
-
-
-def quarantine_filename() -> str:
-    """Build the filename under which one ingest writes its quarantined lines."""
-    # the uuid keeps two ingests on the same day from overwriting each other,
-    # which is routine: a sweep files sixty archives in an afternoon. The date
-    # leads so the files sort by when the ingest found the damage.
-    return f"{datetime.now(tz=UTC).date().isoformat()}_{uuid4()}"
-
-
 def empty_select(schema: dict[str, str]) -> str:
     """Build a SELECT with `schema`'s columns and no rows.
 
@@ -385,41 +321,6 @@ def empty_select(schema: dict[str, str]) -> str:
     """
     columns = ", ".join(f"NULL::{kind} AS {name}" for name, kind in schema.items())
     return f"SELECT {columns} WHERE FALSE"
-
-
-def quarantine_by_payload(files: str) -> str:
-    """How many lines each payload lost, worst first."""
-    # sql_literal() escapes files, which never comes from user input
-    return f"""
-        SELECT payload, count(*) AS lines
-        FROM read_parquet({sql_literal(files)})
-        GROUP BY payload
-        ORDER BY lines DESC, payload
-    """  # noqa: S608
-
-
-def rejected_lines_select() -> str:
-    """Build a SELECT of the lines the reject tables hold, one row per line.
-
-    ``reject_errors`` carries one row per *column* that failed to parse, so a
-    line broken in two places appears twice. Grouped back to one row per line
-    here, which is what a dropped bar actually costs.
-    """
-    # the payload is a staging path that ingest deletes, so the basename is
-    # what's worth keeping: it names the ticker the line belonged to
-    #
-    # REJECTS_TABLE and REJECT_SCANS_TABLE are this module's own constants,
-    # not user input
-    return f"""
-        SELECT
-            parse_filename(scans.file_path) AS payload,
-            errors.line AS line,
-            any_value(errors.csv_line) AS csv_line,
-            string_agg(DISTINCT errors.error_message, ' | ') AS errors
-        FROM {REJECTS_TABLE} AS errors
-        JOIN {REJECT_SCANS_TABLE} AS scans USING (scan_id, file_id)
-        GROUP BY ALL
-    """  # noqa: S608
 
 
 # The bar type levels a resample groups by. The timeframe is missing on purpose:
@@ -526,32 +427,21 @@ def resample_aggregate(timeframe: Timeframe) -> tuple[str, str]:
     return projection, grouping
 
 
-def bars_projection(asset_type: AssetType) -> str:
-    """List the store's columns, in the store's order, for a read of `asset_type`.
+def bars_projection() -> str:
+    """List the store's columns, in the store's order.
 
     Named rather than ``SELECT *``: Hive partitioning appends the key columns
-    in alphabetical order, which nothing else in the store agrees with. A
-    level the tree carries no directory for under this asset type is stated
-    as NULL, so every read answers with the same columns whatever it spans.
+    in alphabetical order, which nothing else in the store agrees with.
     """
-    filed_under = BarType(asset_type).path_levels()
-    levels = [
-        level if level in filed_under else f"NULL::VARCHAR AS {level}"
-        for level in BarType.fields()
-    ]
-    return ", ".join([*BAR_SCHEMA, OPEN_INTEREST, *levels])
+    return ", ".join([*BAR_SCHEMA, OPEN_INTEREST, *BarType.fields()])
 
 
-def stored_bars_select(paths: Iterable[str], asset_type: AssetType) -> str:
-    """Build a SELECT reading the tree's parquet files as the store's columns.
-
-    One asset type per SELECT: DuckDB refuses a read spanning paths with
-    different Hive levels, and ``dataset`` is a level under futures alone.
-    """
+def stored_bars_select(paths: Iterable[str]) -> str:
+    """Build a SELECT reading the tree's parquet files as the store's columns."""
     # sql_list() escapes every path, and bars_projection() only assembles
     # internal SQL fragments. Neither comes from user input.
     return (
-        f"SELECT {bars_projection(asset_type)} "  # noqa: S608
+        f"SELECT {bars_projection()} "  # noqa: S608
         f"FROM read_parquet({sql_list(paths)}, hive_partitioning = true)"
     )
 
@@ -565,9 +455,8 @@ def footer_file_spans_select(files: Iterable[str]) -> str:
     rather than row count. See
     ``docs/notes/duckdb/max-of-a-column-is-a-full-scan-not-footer-stats.md``.
 
-    Statistics are the writer's to omit, and a file without them says nothing
-    about its contents: those come back with NULL bounds and a real row count,
-    for the caller to hand to ``scanned_file_spans_select``.
+    Every file of the tree is written by the store's own ``COPY``, which
+    states the bounds, so a NULL here is a file the store did not write.
     """
     # sql_list() escapes every path, which never comes from user input
     return f"""
@@ -585,53 +474,15 @@ def footer_file_spans_select(files: Iterable[str]) -> str:
     """  # noqa: S608
 
 
-def scanned_file_spans_select(files: Iterable[str]) -> str:
-    """Build the same SELECT for files whose footers state no bounds, by reading them.
-
-    No Hive partitioning: this is handed the files the footers could not
-    answer for, which may sit under paths of different depths.
-    """
-    # sql_list() escapes every path, which never comes from user input
-    return f"""
-        SELECT
-            filename AS file,
-            min(ts) AS first_ts,
-            max(ts) AS last_ts,
-            count(*)::BIGINT AS rows
-        FROM read_parquet({sql_list(files)}, filename = true)
-        GROUP BY 1
-    """  # noqa: S608
-
-
-def catalog_rows_select(file_spans: str) -> str:
-    """Build a SELECT turning per-file spans into catalog rows, from the paths alone.
-
-    The bar type a file is filed under is written in its path, so this needs
-    no argument beyond the spans: it reads every level back off ``file`` and
-    groups the files of one ticker into the one row the catalog keeps for it.
-    """
-    levels = ", ".join(
-        f"{hive_level_expression('file', level)} AS {level}"
-        for level in BarType.fields()
-    )
-    # hive_level_expression() only assembles internal SQL fragments, and
-    # `file_spans` is a SELECT this module built
-    return f"""
-        SELECT
-            {levels},
-            min(first_ts) AS first_ts,
-            max(last_ts) AS last_ts,
-            sum(rows)::BIGINT AS rows
-        FROM ({file_spans})
-        GROUP BY ALL
-    """  # noqa: S608
-
-
 def empty_bars_select() -> str:
     """Build a SELECT with the store's columns and no rows."""
-    bars = ", ".join(f"NULL::{kind} AS {name}" for name, kind in BAR_SCHEMA.items())
-    keys = ", ".join(f"NULL::VARCHAR AS {key}" for key in BarType.fields())
-    return f"SELECT {bars}, NULL::BIGINT AS {OPEN_INTEREST}, {keys} WHERE FALSE"
+    return empty_select(
+        {
+            **BAR_SCHEMA,
+            OPEN_INTEREST: "BIGINT",
+            **dict.fromkeys(BarType.fields(), "VARCHAR"),
+        },
+    )
 
 
 def payload_columns(payloads: Iterable[Path]) -> int:

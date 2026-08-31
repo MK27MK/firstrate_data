@@ -98,8 +98,7 @@ futures.download_contract_bars(
 ```
 
 The contract endpoint takes no `period` and no `adjustment`. The contracts are
-their own dataset, which `futures_contract_bars()` reads and `futures_bars()`
-doesn't.
+what `futures_contract_bars()` reads and `futures_bars()` doesn't.
 
 Indices take one call. The index endpoint accepts `type`, `period` and
 `timeframe`, and no adjustment or `ticker_range`:
@@ -127,8 +126,7 @@ company behind it comes back as two rows keyed on the same ticker. Only stocks
 have a delisted endpoint.
 
 `download_ticker_listing()` writes the rows to the store as well as returning
-them, which is what `store.ticker_listing()` and `store.missing_tickers()`
-read. The rows are stored as served: the vendor lists 169 stock symbols twice
+them, which is what `store.ticker_listing()` reads. The rows are stored as served: the vendor lists 169 stock symbols twice
 and leaves the name empty on 14% of the rows, so the name is a label and not a
 key, and collapsing the rows would be the library guessing on your behalf.
 
@@ -150,8 +148,6 @@ ingested = stocks.download_historical_bars(
 
 ingested.tickers  # int, tickers the archive named; None for a metafile, which has no ticker
 ingested.rows  # int, rows written -- fewer than the archive holds, for an increment
-ingested.rejected  # int, lines DuckDB could not parse. Above zero means rows are missing
-ingested.suspect  # int, written rows that break a bar's own arithmetic
 ```
 
 A `Store` holds one DuckDB connection from `Store.from_env()` until
@@ -172,7 +168,7 @@ the ticker listing one table per asset type under that asset type's level:
 
 ```
 FIRSTRATE_DATA_PATH/firstrate_data/bars/asset_type=stock/adjustment={…}/timeframe={…}/ticker={…}/{date}_{ingest}_{uuid}.parquet
-FIRSTRATE_DATA_PATH/firstrate_data/bars/asset_type=futures/dataset={…}/adjustment={…}/timeframe={…}/ticker={…}/{date}_{ingest}_{uuid}.parquet
+FIRSTRATE_DATA_PATH/firstrate_data/bars/asset_type=futures/adjustment={…}/timeframe={…}/ticker={…}/{date}_{ingest}_{uuid}.parquet
 FIRSTRATE_DATA_PATH/firstrate_data/catalog.parquet
 FIRSTRATE_DATA_PATH/firstrate_data/bars/asset_type={…}/ticker_listing.parquet
 FIRSTRATE_DATA_PATH/firstrate_data/splits.parquet
@@ -180,13 +176,12 @@ FIRSTRATE_DATA_PATH/firstrate_data/dividends.parquet
 FIRSTRATE_DATA_PATH/firstrate_data/contin_audit.parquet
 ```
 
-A path names every level its asset type carries, including the ones no endpoint
-asks about: the store files an index bar under `adjustment=UNADJUSTED`. Only
-futures carry a `dataset`, which separates the continuous series from the
-individual contracts it was stitched from — the one place the vendor serves two
-series of one market. The levels are the fields of `BarType` in
-`firstrate_data.domain`, and a read answers with all five as columns whatever
-it spans, `dataset` NULL where the tree carries no such level.
+A path names every level, including the ones no endpoint asks about: the store
+files an index bar under `adjustment=UNADJUSTED`. A futures continuous series
+and the individual contracts it was stitched from are told apart by their
+adjustment, `contin_adj_ratio` against `UNADJUSTED`. The levels are the fields
+of `BarType` in `firstrate_data.domain`, and a read answers with all four as
+columns whatever it spans.
 
 Each bar's own identity picks its directory, not the request that fetched it,
 so two fetches of one ticker land in the same directory. A stock is filed under
@@ -203,15 +198,15 @@ too, since an archive needs as much free space as the bars it becomes.
 ### One ticker, one copy
 
 A ticker is filed once, and no bar is filed twice. Every ingest weighs what it
-carries against what the store already holds for the tickers it names, per
-parquet file:
+carries against the span the catalog holds for the tickers it names:
 
-- bars that fall outside every span already filed are added
-- a file the archive covers end to end is superseded, but only where the
-  archive is the whole history of what it names: a `period=FULL` fetch, every
-  delisted fetch and every contract fetch
-- anything else that overlaps is a collision. The ingest's own files are
-  removed and it raises `OverlappingBarsError`, having filed nothing
+- an archive that is the whole history of what it names — a `period=FULL`
+  fetch, every delisted fetch and every contract fetch — replaces the tree's
+  bars for those tickers
+- any other archive is added, provided its first bar falls after the last bar
+  the store holds for that ticker
+- otherwise it is a collision. The ingest's own files are removed and it
+  raises `OverlappingBarsError`, having filed nothing
 
 The last rule is what a shorter period runs into. A `WEEK` fetched on Wednesday
 re-serves Monday and Tuesday, and those Monday and Tuesday bars are already in
@@ -227,21 +222,15 @@ the symbol, which is what deciding between them takes.
 
 ### The catalog
 
-`catalog.parquet` holds one row per ticker per bar type — the bar type's five
+`catalog.parquet` holds one row per ticker per bar type — the bar type's four
 levels, the first and last bar filed, and how many. Every ingest keeps it in
 step, and it is what makes the collision check above cost a read of one small
 file rather than a walk of the tree.
 
 ```python
 store.tickers_list(BarType(AssetType.STOCK, timeframe=Timeframe.MIN_1))
-store.missing_tickers(BarType(AssetType.STOCK, timeframe=Timeframe.MIN_1))
 store.catalog()  # the whole thing, as a relation
-store.rebuild_catalog()  # off the tree, for a store whose catalog was lost
 ```
-
-`missing_tickers()` is the catalog against the stored ticker listing: the
-vendor's whole universe for that asset type, minus what the store holds. Both
-sides key on the bare symbol.
 
 ### Restated series take `period=FULL` only
 
@@ -255,18 +244,8 @@ never restated.
 ### Damaged bars
 
 A few vendor payloads have spliced bytes: a bar cut off mid-stamp with a bar
-from days later running into it. Such a line loses its own row, the rest of the
-scan proceeds, and the line goes to the quarantine that `store.quarantined()`
-reads. The quarantine spans every ingest the store has done and nothing ever
-leaves it. `ingested.rejected` counts lines, not DuckDB reject rows, of which
-one splice produces more than one.
-
-A splice that breaks on a comma parses cleanly and gives the store a bar whose
-high is below its low, or whose volume is negative. Every ingest scans the rows
-it just wrote for arithmetic a bar can't break: `high < low`, a high below the
-open or close, a low greater than either, a negative volume. The count lands in
-`ingested.suspect`. The rows stay in the store and
-`store.suspect_bars(ticker="ABC")` reads them back.
+from days later running into it. Such a line aborts the scan and the ingest
+raises, having filed nothing.
 
 ### Timestamps
 
@@ -299,10 +278,9 @@ aapl.aggregate("min(ts), max(ts), count(*)").show()
 recent = aapl.filter("ts >= DATE '2026-01-01'").order("ts")
 frame = aapl.df()  # pandas DataFrame, materialized only now (needs pandas installed)
 
-# no dataset: listed and delisted bars share a ticker, and this reads both
 store.futures_bars(Timeframe.DAY_1, ContinuousFuturesAdjustment.RATIO, ticker="ES")
 store.futures_contract_bars(Timeframe.DAY_1, ticker="ESH24")  # takes no adjustment
-store.index_bars(Timeframe.DAY_1, ticker="SPX")  # takes no adjustment, no dataset
+store.index_bars(Timeframe.DAY_1, ticker="SPX")  # takes no adjustment
 
 # across the whole tree; every level is also a column
 store.bars(timeframe=Timeframe.DAY_1).aggregate(
@@ -388,7 +366,6 @@ report = BundleDownloader(max_workers=4).sweep(
 report.ingested  # [(name, Ingested)]  what each cell left in the store
 report.failed  # [(name, error)]     the API should have served these -- retry
 report.skipped  # [(name, why)]       the API does not offer these -- never retry
-report.rejected  # int                 unparseable lines across the whole sweep
 report.downloaded  # int                 bytes fetched
 report.seconds  # float               wall clock
 report.megabytes_per_second  # end-to-end throughput, ingest included
@@ -418,11 +395,10 @@ time, and an interrupted archive resumes.
 | `Timeframe` | `MIN_1`, `MIN_5`, `MIN_30`, `HOUR_1`, `DAY_1` |
 | `EquitiesAdjustment` | `SPLIT`, `SPLIT_AND_DIVIDEND`, `UNADJUSTED` |
 | `ContinuousFuturesAdjustment` | `RATIO`, `ABSOLUTE`, `UNADJUSTED` |
-| `Adjustment` | `UNADJUSTED`, for indices and futures contracts. The endpoint sends none |
+| `Unadjusted` | `UNADJUSTED`, for indices and futures contracts. The endpoint sends none |
 | `DelistedArchive` | `ARCHIVE_1` .. `ARCHIVE_5` (pre-2026) |
 | `DelistedUpdate` | `YEAR` (2026+), `WEEK` (last week only) |
 | `ContractFiles` | `ARCHIVE` (pre-2026, frozen), `UPDATE` (2026+, daily) |
-| `Dataset` | `CONTINUOUS`, `CONTRACT`. Futures-only: the level no other asset type carries |
 | `OtherData` | `SPLITS`, `DIVIDENDS`, `COMPANY_PROFILES`, `CONTRACT_DATES` |
 
 The API differs across asset types. One client class serves each asset type,

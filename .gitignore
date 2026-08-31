@@ -21,3 +21,5 @@ docs/*
 # vale
 vale_styles/
 .vale.ini
+
+exploration/

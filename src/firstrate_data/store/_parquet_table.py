@@ -32,10 +32,6 @@ class ParquetTable:
         # write into each other's rows
         self._staging_table = f"staged_{path.stem}"
 
-    @property
-    def path(self) -> Path:
-        return self._path
-
     def exists(self) -> bool:
         return self._path.exists()
 

@@ -2,7 +2,6 @@ from firstrate_data.domain import (
     Adjustment,
     ContinuousFuturesAdjustment,
     ContractFiles,
-    Dataset,
     DelistedArchive,
     DelistedUpdate,
     EquitiesAdjustment,
@@ -11,6 +10,7 @@ from firstrate_data.domain import (
     TickerListing,
     Timeframe,
     TradingHours,
+    Unadjusted,
 )
 from firstrate_data.download.client.futures import FuturesClient
 from firstrate_data.download.client.index import IndexClient
@@ -21,7 +21,6 @@ __all__ = [
     "Adjustment",
     "ContinuousFuturesAdjustment",
     "ContractFiles",
-    "Dataset",
     "DelistedArchive",
     "DelistedUpdate",
     "EquitiesAdjustment",
@@ -35,4 +34,5 @@ __all__ = [
     "TickerListing",
     "Timeframe",
     "TradingHours",
+    "Unadjusted",
 ]

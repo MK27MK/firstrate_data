@@ -7,6 +7,7 @@ from firstrate_data.domain import (
     Period,
     Timeframe,
 )
+from firstrate_data.download.bundles import FuturesBundleConfig
 from firstrate_data.download.client.client import Client
 from firstrate_data.download.requests import (
     BarsRequest,
@@ -120,3 +121,6 @@ class FuturesClient(Client):
         return self._download(
             OtherDataRequest(self._asset_type, OtherData.CONTRACT_DATES),
         )
+
+    def download_bundle(self, bundle_config: FuturesBundleConfig) -> None:
+        raise NotImplementedError

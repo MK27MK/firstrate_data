@@ -11,6 +11,7 @@ from firstrate_data.domain import (
     TickerListing,
     Timeframe,
 )
+from firstrate_data.download.bundles import BundleConfig
 from firstrate_data.download.client.file_fetcher import FetchedFile, FileFetcher
 from firstrate_data.download.requests import (
     IngestibleRequest,
@@ -60,7 +61,7 @@ class Client(ABC):
     ) -> Ingested: ...
 
     @abstractmethod
-    def download_bundle(self, bundle_config) -> None: ...
+    def download_bundle(self, bundle_config: BundleConfig) -> None: ...
 
     @property
     def store(self) -> Store:

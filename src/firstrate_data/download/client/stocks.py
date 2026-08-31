@@ -8,6 +8,7 @@ from firstrate_data.domain import (
     Period,
     Timeframe,
 )
+from firstrate_data.download.bundles import StocksBundleConfig
 from firstrate_data.download.client.client import Client
 from firstrate_data.download.requests import (
     BarsRequest,
@@ -55,7 +56,7 @@ class StockClient(Client):
         Returns
         -------
         Ingested
-            Tickers seen, rows written, and lines quarantined.
+            Tickers seen and rows written.
 
         Raises
         ------
@@ -114,7 +115,7 @@ class StockClient(Client):
         Returns
         -------
         Ingested
-            Tickers seen, rows written, and lines quarantined.
+            Tickers seen and rows written.
 
         Raises
         ------
@@ -128,3 +129,10 @@ class StockClient(Client):
                 selector=selector,
             ),
         )
+
+    def download_bundle(self, bundle_config: StocksBundleConfig) -> None:
+        raise NotImplementedError
+
+    # NOTE no endpoint for this
+    # def download_company_profiles(self) -> ...:
+    #     pass

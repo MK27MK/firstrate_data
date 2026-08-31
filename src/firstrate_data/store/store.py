@@ -3,9 +3,8 @@ import zipfile
 from collections import defaultdict
 from collections.abc import Generator, Iterable
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date
-from functools import reduce
 from glob import iglob
 from itertools import batched
 from pathlib import Path
@@ -21,27 +20,23 @@ from firstrate_data.domain import (
     AssetType,
     BarType,
     ContinuousFuturesAdjustment,
-    Dataset,
     EquitiesAdjustment,
     OtherData,
     TickerListing,
     Timeframe,
     TradingHours,
+    Unadjusted,
 )
 from firstrate_data.download.client.file_fetcher import FetchedFile
 from firstrate_data.download.requests import (
     BarsRequest,
+    DelistedBarsRequest,
     IngestibleRequest,
     OtherDataRequest,
 )
-from firstrate_data.store import _catalog, _deflate64, _sql
+from firstrate_data.store import _deflate64, _sql
 from firstrate_data.store._catalog import Catalog, TickerSpan
 from firstrate_data.store._parquet_table import ParquetTable
-
-# Where the rejected lines are kept, one parquet file per ingest that rejected
-# anything. The vendor will serve the same damaged bytes on a re-fetch, so a
-# line dropped here is gone unless it is written down.
-_QUARANTINE_DIRECTORY = "quarantine"
 
 # How many tickers one ``COPY`` may write. DuckDB buffers every open partition,
 # so peak memory tracks distinct bar types rather than input size: 10,000 in one
@@ -59,59 +54,15 @@ TIMEZONE = "America/New_York"
 
 
 @dataclass(frozen=True, slots=True)
-class _FiledBars:
-    """One parquet file of the tree, and the span of the bars it holds."""
-
-    file: str
-    span: TickerSpan
-
-
-@dataclass(frozen=True, slots=True)
-class _Settlement:
-    """What one ingest leaves one ticker holding, once weighed against the tree."""
-
-    # what the catalog records: the arriving bars and every filed span they
-    # left standing
-    span: TickerSpan
-    # the files the arriving bars cover end to end, to be unlinked
-    superseded: list[str]
-    # the filed spans the arriving bars overlap without covering, as
-    # (filed, arriving) pairs. Any of these refuses the whole ingest.
-    collisions: list[tuple[TickerSpan, TickerSpan]]
-
-
-@dataclass(frozen=True, slots=True)
 class Ingested:
-    """What one archive left in the store, and what was wrong with it.
+    """What one archive left in the store.
 
     ``tickers`` is None where the archive has no ticker dimension to count, as a
     metafile does not.
-
-    The two damage counts are not the same kind of thing. ``rejected`` lines
-    never reached the store and are only in the quarantine; ``suspect`` rows are
-    in the tree and readable, and are suspect rather than wrong -- the rule is a
-    heuristic, so they are counted and left alone.
     """
 
     tickers: int | None
     rows: int
-    # rows in the tree that break a bar's own arithmetic -- see
-    # ``_sql.suspect_bars_where``. Always 0 for a metafile, which holds no bars.
-    suspect: int
-    # where this ingest's rejected lines were written, None if it rejected none
-    quarantine: Path | None = None
-    # lines lost per vendor payload, worst first. The payload names the ticker.
-    damaged: tuple[tuple[str, int], ...] = ()
-
-    @property
-    def rejected(self) -> int:
-        """Lines DuckDB could not parse, quarantined rather than aborting the batch.
-
-        One line counts once, however many of its columns were unreadable.
-        """
-        # derived rather than stored: the breakdown is read back off the
-        # quarantine file, so this cannot drift from what is on disk
-        return sum(lines for _, lines in self.damaged)
 
 
 class OverlappingBarsError(ValueError):
@@ -122,18 +73,14 @@ class OverlappingBarsError(ValueError):
     ) -> None:
         self.bar_type = bar_type
         self.collisions = tuple(collisions)
-
-        collisions_named = 5
         named = "; ".join(
-            f"{held.ticker} holds {held.first_ts:%Y-%m-%d}..{held.last_ts:%Y-%m-%d}, "
-            f"archive carries {arriving.first_ts:%Y-%m-%d}..{arriving.last_ts:%Y-%m-%d}"
-            for held, arriving in self.collisions[:collisions_named]
+            f"{held.ticker} holds bars through {held.last_ts:%Y-%m-%d}, "
+            f"archive carries them from {arriving.first_ts:%Y-%m-%d}"
+            for held, arriving in self.collisions
         )
-        unnamed = len(self.collisions) - collisions_named
-        rest = f", and {unnamed} more" if unnamed > 0 else ""
         super().__init__(
             f"{len(self.collisions)} tickers already hold bars this archive "
-            f"carries again: {named}{rest}. Nothing was filed.",
+            f"carries again: {named}. Nothing was filed.",
         )
 
 
@@ -203,18 +150,6 @@ class Store:
         self._spool.mkdir(parents=True, exist_ok=True)
         return self._spool
 
-    @property
-    def quarantine(self) -> Path:
-        """Where the lines that could not be parsed are kept. Created if absent.
-
-        One parquet file per ingest that rejected anything, holding the payload
-        the line came from, its line number, the line itself and what DuckDB
-        made of it. Empty until something is rejected.
-        """
-        quarantine = self._directory / _QUARANTINE_DIRECTORY
-        quarantine.mkdir(parents=True, exist_ok=True)
-        return quarantine
-
     # ------------------------------------------------------------------
     # writing methods
     # ------------------------------------------------------------------
@@ -264,28 +199,6 @@ class Store:
         table.rewrite(f"SELECT * FROM {staged}")  # noqa: S608
         return int(table.relation().shape[0])
 
-    def rebuild_catalog(self) -> int:
-        """Rebuild the catalog off the tree; returns the rows it now holds.
-
-        The tree is the only other place the catalog's answers live, so this
-        is what brings a store back in step after its catalog was lost, or
-        after files were moved into it by hand. It reads parquet footers
-        rather than bars, so the cost is the file count and not the row count.
-        """
-        files = sorted(
-            iglob(  # noqa: PTH207 - a recursive glob string, not a Path.glob pattern
-                str(self._bars_directory / "**" / PARQUET_FILES),
-                recursive=True,
-            ),
-        )
-        if not files:
-            self._catalog.rebuild_from(_sql.empty_select(_catalog.SCHEMA))
-            return 0
-        self._catalog.rebuild_from(
-            _sql.catalog_rows_select(self._file_spans_select(files)),
-        )
-        return int(self._catalog.relation().shape[0])
-
     # ------------------------------------------------------------------
     # reading methods
     # ------------------------------------------------------------------
@@ -302,9 +215,9 @@ class Store:
     ) -> duckdb.DuckDBPyRelation:
         """Stock bars, as a lazy relation.
 
-        No ``dataset`` parameter: the vendor's listed and delisted bundles are
-        two places it files one symbol, and the store files both under the
-        bare symbol, so this answers with every bar it holds for the ticker.
+        The vendor's listed and delisted bundles are two places it files one
+        symbol, and the store files both under the bare symbol, so this
+        answers with every bar it holds for the ticker.
         Which company held the symbol over which days is
         ``ticker_listing(ticker=...)``'s to say.
         """
@@ -327,8 +240,8 @@ class Store:
     ) -> duckdb.DuckDBPyRelation:
         """Futures continuous-series bars, as a lazy relation.
 
-        No ``dataset`` parameter: individual contracts are read with
-        ``futures_contract_bars`` instead. A continuous series is a
+        Individual contracts are read with ``futures_contract_bars``
+        instead. A continuous series is a
         construction, and which one you get is the adjustment's to say; a
         contract is a real instrument, with no roll inside it to correct for and
         so no adjustment to choose. The two do not share a signature, and one
@@ -339,7 +252,6 @@ class Store:
             BarType(
                 AssetType.FUTURES,
                 timeframe=timeframe,
-                dataset=Dataset.CONTINUOUS,
                 adjustment=adjustment,
             ),
             ticker,
@@ -364,8 +276,7 @@ class Store:
             BarType(
                 AssetType.FUTURES,
                 timeframe=timeframe,
-                dataset=Dataset.CONTRACT,
-                adjustment=Adjustment.UNADJUSTED,
+                adjustment=Unadjusted.UNADJUSTED,
             ),
             ticker,
             start=start,
@@ -389,7 +300,7 @@ class Store:
             BarType(
                 AssetType.INDEX,
                 timeframe=timeframe,
-                adjustment=Adjustment.UNADJUSTED,
+                adjustment=Unadjusted.UNADJUSTED,
             ),
             ticker,
             start=start,
@@ -403,7 +314,6 @@ class Store:
         asset_type: AssetType | None = None,
         timeframe: Timeframe | None = None,
         adjustment: Adjustment | None = None,
-        dataset: Dataset | None = None,
         ticker: str | Iterable[str] | None = None,
         start: date | None = None,
         end: date | None = None,
@@ -413,63 +323,16 @@ class Store:
         Every omitted selector spans all its values, so an unfiltered call
         interleaves adjustments: the same bar appears once per adjustment it was
         fetched under. Narrow with the selectors rather than a ``WHERE`` -- they
-        build the glob, which is what makes a fine slice fast. A ``dataset``
-        narrows to futures on its own: no other asset type is filed under one.
+        build the glob, which is what makes a fine slice fast.
 
         No ``hours``: the exchange session is defined per asset type, and this
         read spans them all. Ask the asset type's own method for that.
         """
         return self._read(
-            BarType(
-                asset_type,
-                timeframe=timeframe,
-                dataset=dataset,
-                adjustment=adjustment,
-            ),
+            BarType(asset_type, timeframe=timeframe, adjustment=adjustment),
             ticker,
             start=start,
             end=end,
-        )
-
-    def suspect_bars(
-        self,
-        *,
-        asset_type: AssetType | None = None,
-        timeframe: Timeframe | None = None,
-        adjustment: Adjustment | None = None,
-        dataset: Dataset | None = None,
-        ticker: str | Iterable[str] | None = None,
-    ) -> duckdb.DuckDBPyRelation:
-        """Bars in the tree that do not hold together, as a lazy relation.
-
-        The ones a spliced line leaves behind when it happens to land on a comma:
-        they parse, so nothing rejects them, and they enter the store as bars
-        whose high is below their low or whose volume is negative. Selectors
-        narrow the same way ``bars`` does.
-
-        A heuristic, not a verdict -- these rows are in the store and stay there.
-        """
-        return self.bars(
-            asset_type=asset_type,
-            timeframe=timeframe,
-            adjustment=adjustment,
-            dataset=dataset,
-            ticker=ticker,
-        ).filter(_sql.suspect_bars_where())
-
-    def quarantined(self) -> duckdb.DuckDBPyRelation:
-        """Every line the store could not parse, as a lazy relation.
-
-        The whole quarantine, not one ingest's: nothing is ever removed from it,
-        so this is every line the store has ever lost, and the payload column
-        names the ticker each belonged to. Empty where nothing was rejected.
-        """
-        files = sorted(self.quarantine.glob("*.parquet"))
-        if not files:
-            return self._connection.sql(_sql.empty_select(_sql.QUARANTINE_SCHEMA))
-        return self._connection.sql(
-            # each path is escaped by _sql.sql_list()
-            f"SELECT * FROM read_parquet({_sql.sql_list(str(file) for file in files)})",  # noqa: S608
         )
 
     def subsample_bars(
@@ -504,50 +367,16 @@ class Store:
         """
         return self._catalog.tickers(bar_type)
 
-    def missing_tickers(self, bar_type: BarType) -> list[str]:
-        """The vendor's tickers for `bar_type` that the store holds no bars for.
-
-        The listing is the vendor's whole universe for an asset type, so this
-        is what a sweep of that bar type has left to fetch. Both sides key on
-        the bare symbol, the delisted suffix already parsed off.
-
-        Raises
-        ------
-        ValueError
-            If `bar_type` names no asset type. The listing is served per one.
-        FileNotFoundError
-            If no listing for that asset type is in the store.
-
-        """
-        asset_type = bar_type.asset_type
-        if asset_type is None:
-            msg = "the ticker listing is served per asset type: name one"
-            raise ValueError(msg)
-        served = {
-            ticker
-            for (ticker,) in self.ticker_listing(asset_type=asset_type)
-            .project("ticker")
-            .distinct()
-            .fetchall()
-        }
-        return sorted(served - set(self.tickers_list(bar_type)))
-
     def ticker_listing(
         self,
         *,
         asset_type: AssetType | None = None,
         ticker: str | None = None,
     ) -> duckdb.DuckDBPyRelation:
-        """Who held a ticker and over which days, as the vendor listed it.
-
-        One row per row served, so a symbol two companies held is two rows,
-        with a name and the days each of them held it. That is what separates
-        one company's bars from another's under a symbol the store files once.
-
-        Raises
+        """Raises
         ------
         FileNotFoundError
-            If no ticker listing is in the store; fetch it first.
+            If no ticker listing is in the store.
 
         """
         asset_types = [asset_type] if asset_type is not None else list(AssetType)
@@ -586,10 +415,6 @@ class Store:
         """Which individual contracts were stitched into the continuous series."""
         return self._other_data(OtherData.CONTRACT_DATES)
 
-    def company_profiles(self) -> duckdb.DuckDBPyRelation:
-        ...
-        # TODO
-
     # ------------------------------------------------------------------
     # ingest internals
     # ------------------------------------------------------------------
@@ -599,18 +424,13 @@ class Store:
 
         The archive is unzipped inside the store, read, and deleted. Whether
         it replaces the bars it names is the source's to say: a replacing
-        fetch carries the whole history of every ticker it names, so it
-        supersedes what the store holds. Any other fetch adds to it, and bars
-        landing on a span already filed are a collision rather than an
-        overlap to trim -- ``OverlappingBarsError``, with nothing filed.
-
-        A non-zero ``Ingested.rejected`` means the store is incomplete: those
-        lines could not be parsed, and only the quarantine has them now. A
-        non-zero ``Ingested.suspect`` means the opposite -- rows that parsed and
-        are in the tree, but do not hold together as bars.
+        fetch carries the whole history of every ticker it names, so what the
+        store holds for those tickers goes first. Any other fetch adds to it,
+        and bars landing on a span already filed are a collision rather than
+        an overlap to trim -- ``OverlappingBarsError``, with nothing filed.
         """
         bar_type = request.bar_type
-        suffixed = request.payload_names_carry_delisted_suffix
+        suffixed = isinstance(request, DelistedBarsRequest)
 
         # minted once for the whole archive, not per batch: the point of the id
         # is that one glob afterwards finds everything this archive wrote
@@ -618,10 +438,11 @@ class Store:
 
         with self._unzipped(archive) as staging:
             payloads = self._payloads_by_ticker(staging, strip_delisted_suffix=suffixed)
-            # read before the write, and per file rather than per ticker: which
-            # of these the archive supersedes is decided file by file, and
-            # after the COPY they are no longer telling apart from its own
-            held = self._filed_bars(bar_type, payloads)
+            if request.must_replace_existing_bars:
+                self._remove_existing_bars(bar_type, payloads)
+                held: dict[str, TickerSpan] = {}
+            else:
+                held = self._catalog.spans(bar_type, payloads)
             columns_in_payload = _sql.payload_columns(
                 payload for files in payloads.values() for payload in files
             )
@@ -636,25 +457,8 @@ class Store:
                     strip_delisted_suffix=suffixed,
                 )
 
-        # before the collision check: the reject tables outlive this ingest, so
-        # leaving them filled would charge the next one with this one's damage
-        quarantine, damaged = self._drain_rejects()
-
-        self._file_over(
-            bar_type,
-            held,
-            self._written_spans(bar_type, ingest),
-            ingest,
-            supersedes=request.must_replace_existing_bars,
-        )
-
-        return Ingested(
-            len(payloads),
-            rows,
-            self._count_suspect(bar_type, ingest),
-            quarantine,
-            damaged,
-        )
+        self._file_over(bar_type, held, self._written_spans(bar_type, ingest), ingest)
+        return Ingested(len(payloads), rows)
 
     def _ingest_other_data(self, content: Path, other_data: OtherData) -> Ingested:
         """Replace one metafile table -- splits, dividends, or the continuous audit.
@@ -682,10 +486,7 @@ class Store:
                 """)
             staged.replace(target)
 
-        quarantine, damaged = self._drain_rejects()
-        # a metafile is a corporate action, not a bar: there is no open, high,
-        # low or close for the suspect rule to hold against
-        return Ingested(None, rows, 0, quarantine, damaged)
+        return Ingested(None, rows)
 
     @contextmanager
     def _unzipped(self, archive: Path) -> Generator[Path]:
@@ -743,7 +544,7 @@ class Store:
             columns_in_payload,
             strip_delisted_suffix=strip_delisted_suffix,
         )
-        levels = ", ".join(bar_type.path_levels())
+        levels = ", ".join(bar_type.to_dict())
         return self._execute_counting(f"""
             COPY ({select})
             TO {_sql.sql_literal(str(self._bars_directory))}
@@ -765,112 +566,63 @@ class Store:
             return {}
         ticker = _sql.hive_level_expression("file", "ticker")
         # `ticker` is built from BarType's own field names, and
-        # _file_spans_select() escapes every path it reads
+        # footer_file_spans_select() escapes every path it reads
         spans = self._connection.sql(
             f"SELECT {ticker} AS ticker, min(first_ts), max(last_ts), sum(rows) "  # noqa: S608
-            f"FROM ({self._file_spans_select(files)}) GROUP BY 1",
+            f"FROM ({_sql.footer_file_spans_select(files)}) GROUP BY 1",
         ).fetchall()
         return {
             named: TickerSpan(named, first_ts, last_ts, int(rows))
             for named, first_ts, last_ts, rows in spans
         }
 
-    def _filed_bars(
-        self,
-        bar_type: BarType,
-        tickers: Iterable[str],
-    ) -> dict[str, list[_FiledBars]]:
-        """What the tree already holds for `tickers`, one entry per parquet file."""
-        files = sorted(
-            file
-            for ticker in tickers
-            # each `pattern` is a full glob string built by _get_bar_path(),
-            # not decomposable into Path(base).glob(pattern) here
-            for file in iglob(  # noqa: PTH207
-                self._get_bar_path(bar_type.from_ticker(ticker)),
+    def _remove_existing_bars(self, bar_type: BarType, tickers: Iterable[str]) -> None:
+        """Unlink the tree's bars for `tickers`, which the archive replaces whole."""
+        for ticker in tickers:
+            directory = Path(
+                self._get_bar_path(bar_type.from_ticker(ticker), files_regex=None),
             )
-        )
-        if not files:
-            return {}
-
-        ticker_level = _sql.hive_level_expression("file", "ticker")
-        # `ticker_level` is built from BarType's own field names, and
-        # _file_spans_select() escapes every path it reads
-        rows = self._connection.sql(
-            f"SELECT file, {ticker_level} AS ticker, first_ts, last_ts, rows "  # noqa: S608
-            f"FROM ({self._file_spans_select(files)})",
-        ).fetchall()
-
-        held: defaultdict[str, list[_FiledBars]] = defaultdict(list)
-        for file, ticker, first_ts, last_ts, filed_rows in rows:
-            span = TickerSpan(ticker, first_ts, last_ts, int(filed_rows))
-            held[ticker].append(_FiledBars(file, span))
-        return dict(held)
+            if directory.exists():
+                shutil.rmtree(directory)
 
     def _file_over(
         self,
         bar_type: BarType,
-        held: dict[str, list[_FiledBars]],
+        held: dict[str, TickerSpan],
         arriving: dict[str, TickerSpan],
         ingest: str,
-        *,
-        supersedes: bool,
     ) -> None:
-        """Settle one ingest against the bars its tickers already had.
-
-        A file the archive covers end to end is superseded, and only where the
-        archive is the whole history of what it names -- an increment carries
-        a tail, and a tail that reaches back into filed bars is a second copy
-        of them. Anything else that overlaps is a collision: the ingest's own
-        files go, and nothing it carried is filed.
+        """Record what one ingest filed, or refuse it for landing on filed bars.
 
         Raises
         ------
         OverlappingBarsError
-            If any ticker's arriving bars overlap bars already filed without
-            covering them whole.
+            If any ticker's arriving bars reach back into bars already filed.
 
         """
-        settled = [
-            self._settle(held.get(ticker, []), span, supersedes=supersedes)
+        collisions = [
+            (held[ticker], span)
             for ticker, span in sorted(arriving.items())
+            if ticker in held and span.first_ts <= held[ticker].last_ts
         ]
-
-        collisions = [collision for one in settled for collision in one.collisions]
         if collisions:
             for file in self._ingest_files(bar_type, ingest):
                 Path(file).unlink(missing_ok=True)
             raise OverlappingBarsError(bar_type, collisions)
 
-        for one in settled:
-            for file in one.superseded:
-                Path(file).unlink(missing_ok=True)
-        self._catalog.record(bar_type, [one.span for one in settled])
-
-    @staticmethod
-    def _settle(
-        held: list[_FiledBars],
-        arriving: TickerSpan,
-        *,
-        supersedes: bool,
-    ) -> _Settlement:
-        """Weigh one ticker's arriving bars against the files it already had."""
-        standing: list[TickerSpan] = []
-        superseded: list[str] = []
-        collisions: list[tuple[TickerSpan, TickerSpan]] = []
-        for filed in held:
-            if not filed.span.overlaps(arriving):
-                standing.append(filed.span)
-            elif supersedes and filed.span.within(arriving):
-                superseded.append(filed.file)
-            else:
-                collisions.append((filed.span, arriving))
-        # the span the catalog keeps covers what survived here together with
-        # what arrived, which by now cannot overlap
-        return _Settlement(
-            reduce(TickerSpan.merged_with, standing, arriving),
-            superseded,
-            collisions,
+        self._catalog.record(
+            bar_type,
+            [
+                span
+                if ticker not in held
+                else TickerSpan(
+                    ticker,
+                    held[ticker].first_ts,
+                    span.last_ts,
+                    held[ticker].rows + span.rows,
+                )
+                for ticker, span in sorted(arriving.items())
+            ],
         )
 
     def _ingest_files(self, bar_type: BarType, ingest: str) -> list[str]:
@@ -882,29 +634,6 @@ class Store:
         # `pattern` is a full glob string built by _get_bar_path(), not
         # decomposable into Path(base).glob(pattern) at this call site
         return sorted(iglob(pattern))  # noqa: PTH207
-
-    def _file_spans_select(self, files: list[str]) -> str:
-        """Build a SELECT of ``(file, first_ts, last_ts, rows)`` for `files`.
-
-        Off the parquet footers, which is a read of ~10.6 KB per file rather
-        than of every row. Statistics are the writer's to omit, and a file
-        without them says nothing about its contents -- reading that as an
-        empty span would leave a ticker's real span unrecorded -- so those
-        files, and only those, are scanned.
-        """
-        footers = _sql.footer_file_spans_select(files)
-        # the footers come from _sql.footer_file_spans_select(), which escapes
-        # every path it reads
-        unstated = [
-            file
-            for (file,) in self._connection.sql(
-                f"SELECT file FROM ({footers}) WHERE first_ts IS NULL",  # noqa: S608
-            ).fetchall()
-        ]
-        stated = f"SELECT * FROM ({footers}) WHERE first_ts IS NOT NULL"  # noqa: S608
-        if not unstated:
-            return stated
-        return f"{stated} UNION ALL BY NAME {_sql.scanned_file_spans_select(unstated)}"
 
     @contextmanager
     def _other_data_payloads(
@@ -948,70 +677,6 @@ class Store:
         written = self._connection.execute(statement).fetchall()
         return 0 if not written else int(written[0][0])
 
-    def _count_suspect(self, bar_type: BarType, ingest: str) -> int:
-        """Rows one ingest wrote that do not hold together as bars.
-
-        Scoped to that ingest's own files, so the cost is the archive's and not
-        the store's, and so an increment is not charged with the damage every
-        earlier run left in the bars it is extending.
-        """
-        files = self._ingest_files(bar_type, ingest)
-        # an archive of empty payloads writes no file at all, and DuckDB reads
-        # a glob that matches nothing as an error rather than as no rows
-        if not files:
-            return 0
-
-        counted = self._connection.sql(
-            # each path is escaped by _sql.sql_list(); the WHERE clause comes
-            # from _sql.suspect_bars_where(), an internal builder
-            f"SELECT count(*) FROM read_parquet({_sql.sql_list(files)}) "  # noqa: S608
-            f"WHERE {_sql.suspect_bars_where()}",
-        ).fetchone()
-        return 0 if counted is None else int(counted[0])
-
-    def _drain_rejects(self) -> tuple[Path | None, tuple[tuple[str, int], ...]]:
-        """Write the last ingest's unparseable lines to the quarantine, emptying
-        the tally. Answers with the file written and the lines lost per payload.
-
-        DuckDB appends to the reject tables for the life of the connection, so
-        reading them without emptying them would charge every ingest with all the
-        damage found before it.
-        """
-        try:
-            counted = self._connection.sql(
-                # the subquery comes from _sql.rejected_lines_select(), an
-                # internal builder
-                f"SELECT count(*) FROM ({_sql.rejected_lines_select()})",  # noqa: S608
-            ).fetchone()
-        except duckdb.CatalogException:
-            # the tables are created lazily, by the first scan that rejects
-            # anything -- absent means a clean store, not a broken one
-            return None, ()
-
-        # the tables outlive the ingest that filled them, so they are here and
-        # empty for every clean ingest after a damaged one. Asked first so a
-        # clean ingest neither writes an empty file nor makes the directory.
-        if counted is None or not counted[0]:
-            return None, ()
-
-        quarantined = self.quarantine / f"{_sql.quarantine_filename()}.parquet"
-        self._connection.execute(f"""
-            COPY ({_sql.rejected_lines_select()})
-            TO {_sql.sql_literal(str(quarantined))}
-            (FORMAT PARQUET, COMPRESSION ZSTD)
-            """)
-        # both table names are internal module constants, not interpolated input
-        self._connection.execute(f"DELETE FROM {_sql.REJECTS_TABLE}")  # noqa: S608
-        self._connection.execute(f"DELETE FROM {_sql.REJECT_SCANS_TABLE}")  # noqa: S608
-
-        # read back off the file rather than off the tables, which are empty by
-        # now: what the caller is told and what a later reader of the quarantine
-        # will find are then the same rows, not two counts of one thing
-        damaged = self._connection.sql(
-            _sql.quarantine_by_payload(str(quarantined)),
-        ).fetchall()
-        return quarantined, tuple((payload, int(lines)) for payload, lines in damaged)
-
     # ------------------------------------------------------------------
     # helpers
     # ------------------------------------------------------------------
@@ -1033,19 +698,24 @@ class Store:
         end: date | None = None,
         hours: TradingHours = TradingHours.ALL,
     ) -> duckdb.DuckDBPyRelation:
-        available = self._available_paths(bar_type, ticker)
+        tickers = (
+            [ticker] if ticker is None or isinstance(ticker, str) else list(ticker)
+        )
+        available = [
+            pattern
+            for one in tickers
+            # each `pattern` is a full glob string built by _get_bar_path(), not
+            # decomposable into Path(base).glob(pattern) at this call site
+            if next(
+                iglob(pattern := self._get_bar_path(bar_type.from_ticker(one))),  # noqa: PTH207
+                None,
+            )
+            is not None
+        ]
         if not available:
             return self._connection.sql(_sql.empty_bars_select())
 
-        # one SELECT per asset type, unioned: DuckDB refuses a single read
-        # spanning paths of different Hive levels, and futures carry a
-        # ``dataset`` level the other asset types do not
-        bars_relation = self._connection.sql(
-            "\nUNION ALL BY NAME\n".join(
-                _sql.stored_bars_select(paths, asset_type)
-                for asset_type, paths in available.items()
-            ),
-        )
+        bars_relation = self._connection.sql(_sql.stored_bars_select(available))
 
         # both are ``WHERE``, not selectors: neither the clock nor the calendar
         # is a level of the tree, so no glob can narrow them
@@ -1060,47 +730,6 @@ class Store:
                 _sql.regular_trading_hours_where(bar_type.asset_type),
             )
         return bars_relation
-
-    def _available_paths(
-        self,
-        bar_type: BarType,
-        ticker: str | Iterable[str] | None,
-    ) -> dict[AssetType, list[str]]:
-        """The globs that match files, grouped by the asset type they are under."""
-        tickers = (
-            [ticker] if ticker is None or isinstance(ticker, str) else list(ticker)
-        )
-        available: dict[AssetType, list[str]] = {}
-        for asset_type in self._asset_types_of(bar_type):
-            typed = replace(bar_type, asset_type=asset_type)
-            paths = [
-                pattern
-                for one in tickers
-                # each `pattern` is a full glob string built by _get_bar_path(),
-                # not decomposable into Path(base).glob(pattern) here
-                if next(
-                    iglob(pattern := self._get_bar_path(typed.from_ticker(one))),  # noqa: PTH207
-                    None,
-                )
-                is not None
-            ]
-            if paths:
-                available[asset_type] = paths
-        return available
-
-    @staticmethod
-    def _asset_types_of(bar_type: BarType) -> list[AssetType]:
-        """The asset types a read of `bar_type` can find bars under.
-
-        A stated one answers for itself. An unstated one spans them all, minus
-        those the other levels rule out: a stated ``dataset`` is a futures
-        level, and nothing else is filed under one.
-        """
-        if bar_type.asset_type is not None:
-            return [bar_type.asset_type]
-        if bar_type.dataset is not None:
-            return [AssetType.FUTURES]
-        return list(AssetType)
 
     def _ticker_listing_table(self, asset_type: AssetType) -> ParquetTable:
         """The listing of one asset type, filed under that asset type's level."""
@@ -1134,7 +763,7 @@ class Store:
         self, bar_type: BarType, files_regex: str | None = PARQUET_FILES
     ) -> str:
         """The path, or glob, the tree files `bar_type` under."""
-        stated = bar_type.path_levels()
+        stated = bar_type.to_dict()
 
         if files_regex is None and None in stated.values():
             unset = [key for key, value in stated.items() if value is None]

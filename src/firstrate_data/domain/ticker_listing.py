@@ -19,9 +19,13 @@ class TickerListing:
 
     @classmethod
     def from_csv(cls, csv_body: str) -> list[Self]:
-        # get one TickerListing for each row of file_body
+        # get one TickerListing for each row of file_body; the vendor heads the
+        # file with "Ticker,Name,First Date,Last Date"
+        rows = csv.reader(csv_body.splitlines())
         listed_tickers = [
-            cls._from_row(row) for row in csv.reader(csv_body.splitlines()) if any(row)
+            cls._from_row(row)
+            for row in rows
+            if any(row) and row[0].strip().casefold() != "ticker"
         ]
         if not listed_tickers:
             msg = f"ticker_listing answered with no rows: {csv_body}"
