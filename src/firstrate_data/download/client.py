@@ -77,7 +77,10 @@ class Client:
             config.base_url(),
         )
 
-    def download_bundle(self, bundle_config: BundleConfig) -> None: ...
+    def download_bundle(self, bundle_config: BundleConfig) -> list[Ingested]:
+        return [
+            self._download(request) for request in bundle_requests(bundle_config)
+        ]
 
     @property
     def store(self) -> Store:

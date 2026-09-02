@@ -32,6 +32,7 @@ max-complexity = 5
 
 [lint.per-file-ignores]
 "src/firstrate_data/scripts/*" = ["T201"] # scripts print reports to the terminal by design
+"examples/*" = ["T201", "INP001"] # runnable examples print, and are not a package
 "src/firstrate_data/store/_deflate64.py" = ["SLF001"] # patches zipfile's private API: no public seam exists
 "tests/*" = [
     "S101", # assert - we need assertions in tests

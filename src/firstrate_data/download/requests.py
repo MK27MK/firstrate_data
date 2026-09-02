@@ -77,11 +77,13 @@ class BarsRequest:
             ).value,
         }
 
-        # the index docs page lists no adjustment at all, and sending one the
+        # index, FX and crypto list no adjustment at all, and sending one the
         # endpoint doesn't document risks an unpredictable response body.
         # ``Unadjusted`` exists for the bar type path, which names one at
         # every level, and stops at the store's edge
-        if asset_type is not AssetType.INDEX and self.bar_type.adjustment is not None:
+        if self.bar_type.adjustment is not None and not isinstance(
+            self.bar_type.adjustment, Unadjusted
+        ):
             params["adjustment"] = self.bar_type.adjustment.value
 
         # equities-only, and the rules for it live on StockClient -- absent
