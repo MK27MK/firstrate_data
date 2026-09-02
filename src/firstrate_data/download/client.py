@@ -175,6 +175,24 @@ class Client:
     #     pass
 
     # ------------------------------------------------------------------
+    # etf
+    # ------------------------------------------------------------------
+
+    def download_etf_bars(
+        self,
+        period: Period,
+        timeframe: Timeframe,
+        adjustment: EquitiesAdjustment,
+        ticker_range: str | None = None,
+    ) -> Ingested:
+        request = BarsRequest(
+            BarType(AssetType.ETF, timeframe=timeframe, adjustment=adjustment),
+            period,
+            ticker_range=ticker_range,
+        )
+        return self._download(request)
+
+    # ------------------------------------------------------------------
     # index
     # ------------------------------------------------------------------
 

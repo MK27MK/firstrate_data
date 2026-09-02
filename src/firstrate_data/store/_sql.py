@@ -1,8 +1,7 @@
 """The SQL the store runs, assembled in one place.
 
-Every statement ``Store`` runs comes from here, so the rules it depends on --
-the bar schema, how a filename becomes a ticker -- exist once. The write path
-and the read path share them. Where a bar goes in the tree is ``layout``'s.
+Every path and value these statements carry is escaped through ``sql_literal``
+or ``sql_list``; nothing else reaches a statement from user input.
 """
 
 from collections.abc import Iterable
@@ -10,7 +9,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import uuid4
 
-from firstrate_data.domain import AssetType, BarType, OtherData, Timeframe
+from firstrate_data.domain import AssetType, BarType, OtherData
 
 # What a metafile's rows hold, in the vendor's order. They arrive headerless,
 # one file per ticker, so the sniffer has no schema to read. It takes the
@@ -31,6 +30,15 @@ OTHER_DATA_SCHEMA: dict[OtherData, dict[str, str]] = {
 # payloads (``AAPL_divs.txt``) and leaves the splits ones bare
 # (``AAPL.txt``). The suffix isn't part of the ticker.
 OTHER_DATA_SUFFIX: dict[OtherData, str] = {OtherData.DIVIDENDS: "_divs"}
+
+# What the catalog keeps. The key columns are BarType's own fields, in
+# BarType's order, so a row addresses exactly what a path does.
+CATALOG_SCHEMA: dict[str, str] = {
+    **dict.fromkeys(BarType.fields(), "VARCHAR"),
+    "first_ts": "TIMESTAMPTZ",
+    "last_ts": "TIMESTAMPTZ",
+    "rows": "BIGINT",
+}
 
 TICKER_LISTING_SCHEMA: dict[str, str] = {
     "ticker": "VARCHAR",
@@ -56,6 +64,15 @@ BAR_SCHEMA: dict[str, str] = {
 
 OPEN_INTEREST = "open_interest"
 
+# A bar as the tree hands it back: the payload's columns, then the levels the
+# path carries. Named in this order rather than taken from ``SELECT *``, which
+# appends the Hive keys alphabetically and agrees with nothing else here.
+STORED_BAR_SCHEMA: dict[str, str] = {
+    **BAR_SCHEMA,
+    OPEN_INTEREST: "BIGINT",
+    **dict.fromkeys(BarType.fields(), "VARCHAR"),
+}
+
 # macOS drops these beside the payloads too, where they match ``*.txt``
 SIDECAR_PREFIX = "._"
 
@@ -67,15 +84,15 @@ OTHER_DATA_NOTE_PREFIX = "_"
 
 
 def is_other_data_payload(name: str) -> bool:
-    """Whether a file in a metafile archive holds one ticker's rows.
+    """Tell whether a file in a metafile archive holds one ticker's rows.
 
     Examples
     --------
-    >>> is_metafile_payload("AAPL.txt")
+    >>> is_other_data_payload("AAPL.txt")
     True
-    >>> is_metafile_payload("_splits_readme.txt")
+    >>> is_other_data_payload("_splits_readme.txt")
     False
-    >>> is_metafile_payload("._AAPL.txt")
+    >>> is_other_data_payload("._AAPL.txt")
     False
 
     """
@@ -114,43 +131,35 @@ def sql_list(values: Iterable[str]) -> str:
 def ticker_expression(column: str) -> str:
     """Build the SQL expression extracting a payload filename's ticker in `column`.
 
-    The vendor names payloads ``{TICKER}_{period}_{timeframe}_{adjustment}.txt``,
+    The vendor names payloads ``{TICKER}_{period}_{timeframe}_{adjustment}.txt``
     and the ticker is the one field that never contains an underscore, so this
-    reads from the left. The delisted endpoint's ``-DELISTED`` suffix
-    (``OLPX-DELISTED_...``) is part of the ticker the store files under: a
-    recycled symbol is two instruments, and the suffix is what keeps their bars
-    apart.
+    reads from the left. The delisted endpoint's ``-DELISTED`` suffix is part of
+    the ticker: a recycled symbol is two instruments.
     """
     return f"regexp_extract(parse_filename({column}), '^([^_]+)_', 1)"
 
 
-def hive_level_expression(column: str, level: str) -> str:
-    """Build the SQL expression reading one Hive level off a path in `column`."""
-    # both separators: DuckDB reports a path on Windows with backslashes, and
-    # a level bounded by ``/`` alone would swallow the rest of the path into
-    # the value.
-    #
-    # ``level`` is one of BarType's own field names, never user input
-    return f"regexp_extract({column}, '{level}=([^/\\\\]+)', 1)"
+def hive_ticker_expression(column: str) -> str:
+    """Build the SQL expression reading the ticker level off a path in `column`."""
+    # both separators: DuckDB reports a path on Windows with backslashes, and a
+    # level bounded by ``/`` alone would swallow the rest of the path
+    return f"regexp_extract({column}, 'ticker=([^/\\\\]+)', 1)"
 
 
 def payload_tickers_select(directory: Path) -> str:
-    """Build a SELECT of ``(file, ticker)`` for every payload one archive unzipped to.
+    """Build a SELECT of ``(ticker, files)`` for every payload one archive unzipped to.
 
-    Via DuckDB's ``glob``, so the filename-to-ticker rule exists once, in
-    SQL, and the ingest and the removal it does first can't disagree about it.
+    Via DuckDB's ``glob``, so the filename-to-ticker rule exists once, in SQL.
     """
     pattern = sql_literal((directory / "*.txt").as_posix())
-    # pattern and SIDECAR_PREFIX go through sql_literal(), and
-    # ticker_expression() only assembles internal SQL fragments. Neither comes
-    # from user input.
     ticker = ticker_expression("file")
     return (
-        f"SELECT file, {ticker} AS ticker "  # noqa: S608
+        f"SELECT {ticker} AS ticker, list(file) AS files "  # noqa: S608
         f"FROM glob({pattern}) "
         # an AppleDouble sidecar matches *.txt and isn't text. The vendor's own
         # archives carry them when the zip came from a Mac
-        f"WHERE NOT starts_with(parse_filename(file), {sql_literal(SIDECAR_PREFIX)})"
+        f"WHERE NOT starts_with(parse_filename(file), {sql_literal(SIDECAR_PREFIX)}) "
+        f"GROUP BY 1"
     )
 
 
@@ -208,10 +217,6 @@ def bars_select(
         for key, value in bar_type.stated_levels().items()
     )
 
-    # stamped, levels and files go through sql_literal() and sql_list().
-    # volume, open_interest and columns come from this module's own schema
-    # constants. ticker_expression() only assembles internal SQL fragments.
-    # None of this comes from user input.
     return f"""
         SELECT
             -- the DST fall-back repeats an hour of naive stamps; both copies
@@ -234,7 +239,7 @@ def bars_select(
 
 
 def other_data_ticker_expression(column: str, other_data: OtherData) -> str:
-    """Build an SQL expression extracting the ticker from a other_data payload's name."""
+    """Build an SQL expression extracting the ticker from a metafile payload's name."""
     stem = f"parse_filename({column}, true)"
     suffix = OTHER_DATA_SUFFIX.get(other_data)
     if suffix is None:
@@ -257,14 +262,9 @@ def other_data_select(
     files = sql_list(str(payload) for payload in payloads)
     declared = OTHER_DATA_SCHEMA.get(other_data)
     if declared is None or not per_ticker:
-        # sql_list() escapes files, which never comes from user input
         return f"SELECT * FROM read_csv({files})"  # noqa: S608
 
     columns = ", ".join(f"'{name}': '{kind}'" for name, kind in declared.items())
-
-    # sql_list() escapes files. columns and declared come from this module's
-    # OTHER_DATA_SCHEMA constant. other_data_ticker_expression() only assembles
-    # internal SQL fragments. None of this comes from user input.
     return f"""
         SELECT
             {other_data_ticker_expression("filename", other_data)} AS ticker,
@@ -282,75 +282,54 @@ def other_data_select(
 
 def ingest_id() -> str:
     """Generate a short id naming one ingest, to stamp on the files it writes."""
-    # eight hex digits: enough that two ingests of one sweep can't collide,
-    # short enough that the filename stays readable
     return uuid4().hex[:8]
 
 
 def filename_pattern(ingest_id: str) -> str:
     """Build the filename pattern under which one ingest writes its parquet files."""
-    # the uuid isn't decoration. A constant pattern under PARTITION_BY reuses
-    # data_0.parquet, so an increment overwrote a full with no error. A date
-    # alone collides as soon as the same partition takes two writes in one
-    # day -- exactly what appending increments do. APPEND mode requires
-    # {uuid} regardless. The date leads so the file sorts and reads by when it
-    # landed, and so nothing mistakes it for an AppleDouble sidecar.
-    #
-    # The ingest id sits between them so an ingest can find its own files
-    # afterward. Without it, scanning what one archive wrote means scanning
-    # every file its partitions hold -- every earlier run's included.
+    # APPEND under PARTITION_BY requires {uuid}: a constant pattern reuses
+    # data_0.parquet and overwrites with no error. The date leads so the file
+    # sorts by when it landed and no glob mistakes it for an AppleDouble
+    # sidecar. The ingest id between them is how an ingest finds its own files.
     return f"{datetime.now(tz=UTC).date().isoformat()}_{ingest_id}_{{uuid}}"
 
 
-def parquet_file_ingest_id_glob(ingest_id: str) -> str:
-    # leads with the same [0-9] as PARQUET_FILES, so an ingest's files are
-    # ordinary files of the tree that a read finds without knowing this exists
-    return f"[0-9]*_{ingest_id}_*.parquet"
-
-
 def empty_select(schema: dict[str, str]) -> str:
-    """Build a SELECT with `schema`'s columns and no rows.
-
-    What a table the store has never written answers with: a relation of the
-    right shape, so a reader filters and projects it as it would a full one.
-    """
+    """Build a SELECT with `schema`'s columns and no rows."""
     columns = ", ".join(f"NULL::{kind} AS {name}" for name, kind in schema.items())
     return f"SELECT {columns} WHERE FALSE"
 
 
-# The bar type levels a resample groups by. The timeframe is missing on purpose:
-# the resample changes it, so this restates it as the target instead.
-_RESAMPLE_KEYS = tuple(key for key in BarType.fields() if key != "timeframe")
+# keyed by an optional asset type so a read that named none falls into the
+# same "has no session" answer as one that trades around the clock
+EXCHANGE_SESSION: dict[AssetType | None, tuple[time, time]] = dict.fromkeys(
+    (AssetType.STOCK, AssetType.ETF, AssetType.INDEX),
+    (time(9, 30), time(16, 0)),
+)
 
 
-def regular_trading_hours_where(asset_type: AssetType) -> str:
+def regular_trading_hours_where(asset_type: AssetType | None) -> str:
     """Build the predicate keeping ``asset_type``'s exchange session.
 
     The cast to ``TIMESTAMP`` reads the connection's timezone, which the store
-    sets to the zone the bars carry a stamp in. This predicate runs in local
-    clock time and holds across daylight saving.
-
-    This uses one cast rather than ``hour`` and ``minute`` tests because that
-    conversion is the whole cost of the filter. DuckDB shares the repeated
-    ``ts::TIMESTAMP::TIME`` between the two bounds but doesn't share a
-    repeated ``hour(ts)``. The four-call form converts every row four times:
-    2.28s versus 0.88s over 30M minute bars, for the same rows.
+    sets to the zone the bars carry a stamp in, so this runs in local clock
+    time and holds across daylight saving. One cast rather than ``hour`` and
+    ``minute`` tests: DuckDB shares the repeated ``ts::TIMESTAMP::TIME``
+    between the bounds but not a repeated ``hour(ts)``.
 
     Raises
     ------
     ValueError
-        If the asset type trades around the clock and has no session.
+        If no asset type is named, or the one named trades around the clock
+        and so has no session.
 
     """
-    rth: dict[AssetType, tuple[time, time]] = {
-        AssetType.STOCK: (time(9, 30), time(16, 0)),
-        AssetType.ETF: (time(9, 30), time(16, 0)),
-        AssetType.INDEX: (time(9, 30), time(16, 0)),
-    }
-
-    session = rth.get(asset_type)
+    session = EXCHANGE_SESSION.get(asset_type)
     if session is None:
-        msg = f"{asset_type} trades around the clock: it has no session"
+        msg = (
+            f"{asset_type} has no exchange session: it trades around the clock, "
+            f"or the read named no asset type to define one"
+        )
         raise ValueError(msg)
 
     opens, closes = session
@@ -363,10 +342,8 @@ def regular_trading_hours_where(asset_type: AssetType) -> str:
 def date_range_where(start: date | None, end: date | None) -> str | None:
     """Build the predicate keeping days from ``start`` to ``end``, or None for neither.
 
-    Both ends name a whole day, and this keeps both, so a bar stamped 15:59 on
-    ``end`` is inside the range. This ignores the time of day of either bound,
-    which is what makes a ``datetime`` and the ``date`` under it the same
-    request.
+    Both ends name a whole day and both are kept, so a bar stamped 15:59 on
+    ``end`` is inside the range.
 
     Examples
     --------
@@ -385,59 +362,16 @@ def date_range_where(start: date | None, end: date | None) -> str | None:
     return " AND ".join(bounds) or None
 
 
-def resample_aggregate(timeframe: Timeframe) -> tuple[str, str]:
-    """Build the projection and grouping that resample bars into ``timeframe`` buckets.
+def stored_bars_select(glob: str) -> str:
+    """Build a SELECT reading the tree's parquet files as the store's columns.
 
-    One bar per bucket per ticker, in the store's column order: the first
-    bar's open, the extremes across the bucket, and the last bar's close.
-    The volume sums across the bucket. The ``timeframe`` column restates the
-    target, so a resampled relation doesn't still claim to be minutes.
+    One glob spanning every ticker rather than one per ticker: with
+    ``hive_partitioning`` DuckDB turns a predicate on a level into a file
+    filter and never opens the partitions it excludes.
     """
-    # ``date_trunc`` reads the session timezone but ``time_bucket`` doesn't: a day
-    # sampled by ``time_bucket`` starts from the UTC epoch. Sub-hour bins are safe
-    # either way.
-    buckets = [
-        "time_bucket(INTERVAL 1 MINUTE, ts)",
-        "time_bucket(INTERVAL 5 MINUTE, ts)",
-        "time_bucket(INTERVAL 30 MINUTE, ts)",
-        "date_trunc('hour', ts)",
-        "date_trunc('day', ts)",
-    ]
-    timeframe_bucket_sql = dict(zip(list(Timeframe), buckets, strict=False))
-
-    projection = f"""
-        {timeframe_bucket_sql[timeframe]} AS ts,
-        arg_min(open, ts) AS open,
-        max(high) AS high,
-        min(low) AS low,
-        arg_max(close, ts) AS close,
-        sum(volume) AS volume,
-        -- a bucket's open interest is the position left standing at its end,
-        -- never the sum of the readings inside it
-        arg_max({OPEN_INTEREST}, ts) AS {OPEN_INTEREST},
-        {sql_literal(timeframe.value)} AS timeframe,
-        {", ".join(_RESAMPLE_KEYS)}
-    """
-    grouping = ", ".join([timeframe_bucket_sql[timeframe], *_RESAMPLE_KEYS])
-    return projection, grouping
-
-
-def bars_projection() -> str:
-    """List the store's columns, in the store's order.
-
-    Named rather than ``SELECT *``: Hive partitioning appends the key columns
-    in alphabetical order, which nothing else in the store agrees with.
-    """
-    return ", ".join([*BAR_SCHEMA, OPEN_INTEREST, *BarType.fields()])
-
-
-def stored_bars_select(paths: Iterable[str]) -> str:
-    """Build a SELECT reading the tree's parquet files as the store's columns."""
-    # sql_list() escapes every path, and bars_projection() only assembles
-    # internal SQL fragments. Neither comes from user input.
     return (
-        f"SELECT {bars_projection()} "  # noqa: S608
-        f"FROM read_parquet({sql_list(paths)}, hive_partitioning = true)"
+        f"SELECT {', '.join(STORED_BAR_SCHEMA)} "  # noqa: S608
+        f"FROM read_parquet({sql_literal(glob)}, hive_partitioning = true)"
     )
 
 
@@ -445,15 +379,10 @@ def footer_file_spans_select(files: Iterable[str]) -> str:
     """Build a SELECT of ``(file, first_ts, last_ts, rows)`` read off parquet footers.
 
     Not ``min(ts)``/``max(ts)`` over the tree: DuckDB fully reads and decodes
-    the column for those, which at this store's shape runs to minutes.
-    ``parquet_metadata`` reads ~10.6 KB per file and scales with file count
-    rather than row count. See
+    the column for those. ``parquet_metadata`` scales with file count rather
+    than row count. See
     ``docs/notes/duckdb/max-of-a-column-is-a-full-scan-not-footer-stats.md``.
-
-    Every file of the tree is written by the store's own ``COPY``, which
-    states the bounds, so a NULL here is a file the store did not write.
     """
-    # sql_list() escapes every path, which never comes from user input
     return f"""
         SELECT
             file_name AS file,
@@ -469,30 +398,30 @@ def footer_file_spans_select(files: Iterable[str]) -> str:
     """  # noqa: S608
 
 
-def empty_bars_select() -> str:
-    """Build a SELECT with the store's columns and no rows."""
-    return empty_select(
-        {
-            **BAR_SCHEMA,
-            OPEN_INTEREST: "BIGINT",
-            **dict.fromkeys(BarType.fields(), "VARCHAR"),
-        },
-    )
+def bar_type_where(bar_type: BarType) -> str:
+    """Build the predicate matching the catalog rows `bar_type` addresses.
+
+    A level left unstated matches every value of it.
+    """
+    tests = [
+        f"{level} = {sql_literal(value)}"
+        for level, value in bar_type.stated_levels().items()
+    ]
+    return " AND ".join(tests) or "TRUE"
 
 
 def payload_columns(payloads: Iterable[Path]) -> int:
-    """How many columns this archive's payloads carry.
+    """Count the columns this archive's payloads carry.
 
     Six is the common bar. Futures add ``open_interest`` as a seventh. An index
     payload has five: a published level has no volume behind it.
     """
-    # probed rather than ruled from (asset_type, timeframe): a rule would be a
-    # second source of truth about the vendor's file, free to drift from it.
-    # Empty payloads are routine, so one non-empty payload speaks for the archive.
+    # probed rather than ruled from (asset_type, timeframe), which would be a
+    # second source of truth about the vendor's file. Empty payloads are
+    # routine, so one non-empty payload speaks for the archive.
     for payload in payloads:
-        # bytes, not text. A spliced payload holds bytes that aren't a
-        # character in the machine's locale encoding, and this counts a width
-        # from the commas rather than reading it
+        # bytes, not text: a spliced payload holds bytes that aren't a
+        # character in the machine's locale encoding
         with payload.open("rb") as lines:
             for line in lines:
                 if line.strip():

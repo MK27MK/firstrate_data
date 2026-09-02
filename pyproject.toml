@@ -6,10 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "duckdb>=1.5.4",
-    # the vendor's larger archives are Deflate64, which CPython's zipfile
-    # declines to decode -- see firstrate_data/_deflate64.py
-    "inflate64>=1.0.4",
     "python-dotenv>=1.2.2",
+    # imported by nothing here: DuckDB reaches for it to hand a TIMESTAMPTZ
+    # back as a Python datetime, and declares it nowhere itself
     "pytz>=2026.2",
     "requests>=2.34.2",
     "tqdm>=4.67.1",
@@ -17,9 +16,6 @@ dependencies = [
     # it is a direct dependency here rather than one we borrow
     "urllib3>=2.0",
 ]
-
-[project.scripts]
-firstrate = "firstrate_data.scripts.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]

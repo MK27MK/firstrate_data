@@ -1,10 +1,10 @@
 """A small relation the store keeps as one parquet file.
 
-The catalog and the ticker listing are both this shape: a handful of columns,
-one row per ticker or per row the vendor served, small enough to be rewritten
-whole on every change. Rewriting whole is what keeps parquet the only copy
-without a reader ever seeing a half-written file -- the new table is written
-beside the old one and swapped in.
+The catalog, the ticker listing and the metafiles are all this shape: a
+handful of columns, small enough to be rewritten whole on every change.
+Rewriting whole is what keeps parquet the only copy without a reader ever
+seeing a half-written file -- the new table is written beside the old one and
+swapped in.
 """
 
 from collections.abc import Iterable, Sequence
@@ -39,7 +39,6 @@ class ParquetTable:
         """A SELECT of the table as it stands, of the right shape when absent."""
         if not self.exists():
             return _sql.empty_select(self._schema)
-        # the path is the store's own, escaped all the same
         return f"SELECT * FROM read_parquet({_sql.sql_literal(str(self._path))})"  # noqa: S608
 
     def relation(self) -> duckdb.DuckDBPyRelation:
@@ -57,8 +56,6 @@ class ParquetTable:
             return None
 
         declared = ", ".join(f"{name} {kind}" for name, kind in self._schema.items())
-        # the table name and the column declarations are the store's own, and
-        # every value goes in through a bound parameter
         self._connection.execute(
             f"CREATE OR REPLACE TEMP TABLE {self._staging_table} ({declared})",
         )
@@ -69,12 +66,13 @@ class ParquetTable:
         )
         return self._staging_table
 
-    def rewrite(self, select: str) -> None:
-        """Write what `select` answers with over the table, whole."""
+    def rewrite(self, select: str) -> int:
+        """Write what `select` answers with over the table, whole. Returns rows."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         staged = self._path.with_name(f"{self._path.name}.partial")
-        self._connection.execute(f"""
+        written = self._connection.execute(f"""
             COPY ({select})
             TO {_sql.sql_literal(str(staged))} (FORMAT PARQUET, COMPRESSION ZSTD)
-            """)
+            """).fetchall()
         staged.replace(self._path)
+        return int(written[0][0]) if written else 0

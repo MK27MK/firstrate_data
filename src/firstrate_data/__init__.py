@@ -1,5 +1,7 @@
 from firstrate_data.domain import (
     Adjustment,
+    AssetType,
+    BarType,
     ContinuousFuturesAdjustment,
     ContractFiles,
     DelistedArchive,
@@ -12,10 +14,14 @@ from firstrate_data.domain import (
     TradingHours,
     Unadjusted,
 )
+from firstrate_data.download.client import Client
 from firstrate_data.store.store import Ingested, Store
 
 __all__ = [
     "Adjustment",
+    "AssetType",
+    "BarType",
+    "Client",
     "ContinuousFuturesAdjustment",
     "ContractFiles",
     "DelistedArchive",
