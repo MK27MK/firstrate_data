@@ -241,5 +241,5 @@ class OtherDataRequest:
     def to_params(self) -> dict[str, str]:
         return {
             "type": self.asset_type.value,
-            "other_data": self.other_data.value,
+            "metafile_type": self.other_data.value,
         }

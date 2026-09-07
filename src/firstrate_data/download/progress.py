@@ -37,3 +37,9 @@ def track(label: str, total: int | None, unit: str) -> Generator[Advance]:
         yield advance
     finally:
         bar.close()
+
+
+def note(message: str) -> None:
+    """Print a line without breaking a bar that's drawing on the same stream."""
+    # https://tqdm.github.io/docs/tqdm/#write
+    tqdm.write(message)

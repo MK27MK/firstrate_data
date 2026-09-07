@@ -246,6 +246,27 @@ class Store:
             hours=hours,
         )
 
+    def last_bar(
+        self,
+        bar_type: BarType,
+        ticker_prefix: str | None = None,
+    ) -> datetime | None:
+        """Return the timestamp of the newest bar under `bar_type`, narrowed to `ticker_prefix`, or None."""
+        # max, not min: an ingest writes an archive as one unit, so the newest
+        # bar dates the whole ingest. A min would return the last bar of the
+        # most long-dead ticker in the range, which no later download updates
+        # https://duckdb.org/docs/stable/sql/functions/aggregates#maxarg
+        named = (
+            ""
+            if ticker_prefix is None
+            else f" AND starts_with(ticker, {_sql.sql_literal(ticker_prefix.upper())})"
+        )
+        latest = self._connection.sql(
+            f"SELECT max(last_ts) FROM ({self._catalog_table.select()}) "  # noqa: S608
+            f"WHERE {_sql.bar_type_where(bar_type)}{named}",
+        ).fetchone()
+        return latest[0] if latest else None
+
     def catalog(self) -> duckdb.DuckDBPyRelation:
         return self._catalog_table.relation()
 
@@ -404,17 +425,20 @@ class Store:
             The tree and the catalog are untouched.
 
         """
-        # an update is the same history downloaded with more of it: the same
-        # first bar and a later last one. A different start is a different
-        # history under one name, and no bars past the last held are nothing
-        # to file
+        # an update is the same history downloaded again: the same first bar,
+        # and a last one no earlier than the held one. A different start is a
+        # different history under one name, and an archive ending before what
+        # is filed is less than the store holds. An archive ending on the same
+        # bar is the same archive, re-fetched -- filing it over replaces the
+        # ticker's files with identical ones, which is what makes a re-run of
+        # an interrupted bundle resume rather than refuse
         conflicts = [
             (held[ticker], span)
             for ticker, span in sorted(arriving.items())
             if ticker in held
             and not (
                 span.first_ts == held[ticker].first_ts
-                and span.last_ts > held[ticker].last_ts
+                and span.last_ts >= held[ticker].last_ts
             )
         ]
         if conflicts:
@@ -516,19 +540,13 @@ class Store:
         end: date | None = None,
         hours: TradingHours = TradingHours.ALL,
     ) -> duckdb.DuckDBPyRelation:
-        # DuckDB raises on a glob matching nothing, and an empty store or an
-        # unwritten bar type matches nothing
-        if next(self._bar_files(bar_type), None) is None:
+        # DuckDB raises on a glob matching nothing, and an empty store, an
+        # unwritten bar type, or an unheld ticker matches nothing
+        glob = self._matching_glob(bar_type, ticker)
+        if glob is None:
             return self._connection.sql(_sql.empty_select(_sql.STORED_BAR_SCHEMA))
 
-        bars_relation = self._connection.sql(
-            _sql.stored_bars_select(self._bar_glob(bar_type)),
-        )
-        if ticker is not None:
-            named = [ticker] if isinstance(ticker, str) else list(ticker)
-            # a level of the tree, so DuckDB reads this as a file filter and
-            # never opens the partitions it excludes
-            bars_relation = bars_relation.filter(f"ticker IN {_sql.sql_list(named)}")
+        bars_relation = self._connection.sql(_sql.stored_bars_select(glob))
 
         # both are ``WHERE``, not selectors: neither the clock nor the calendar
         # is a level of the tree, so no glob can narrow them
@@ -566,6 +584,25 @@ class Store:
             msg = f"no {other_data.value} metafile in this store -- fetch it first"
             raise FileNotFoundError(msg)
         return table.relation()
+
+    def _matching_glob(
+        self,
+        bar_type: BarType,
+        ticker: str | Iterable[str] | None,
+    ) -> str | list[str] | None:
+        """AI: Return the glob(s) for the files `bar_type` and `ticker` match.
+
+        Returns ``None`` when the store has no file for any of them.
+        """
+        if ticker is None:
+            if next(self._bar_files(bar_type), None) is None:
+                return None
+            return self._bar_glob(bar_type)
+
+        named = [ticker] if isinstance(ticker, str) else list(ticker)
+        scoped = [bar_type.from_ticker(one) for one in named]
+        held = [one for one in scoped if next(self._bar_files(one), None) is not None]
+        return [self._bar_glob(one) for one in held] or None
 
     def _bar_files(
         self,
