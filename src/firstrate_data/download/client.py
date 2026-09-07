@@ -326,7 +326,6 @@ class Client:
         contract_files: ContractFiles,
         timeframe: Timeframe,
     ) -> Ingested:
-
         return self._download(
             ContractBarsRequest(
                 BarType(AssetType.FUTURES, timeframe=timeframe),

@@ -19,7 +19,6 @@ class AssetType(StrEnum):
         return "America/New_York"
 
 
-
 # adjustments ----------------------------------------------------------
 
 
