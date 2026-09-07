@@ -30,6 +30,7 @@ addopts = "--doctest-modules"
 [dependency-groups]
 dev = [
     "ipykernel>=7.3.0",
+    "nbconvert>=7.17.1",
     "numpy>=2.5.1",
     "pandas>=3.0.5",
     "pytest>=9.1.1",
