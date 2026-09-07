@@ -1,7 +1,7 @@
-from firstrate_data.domain import (
+from firstrate_data.domain.bar_type import BarType
+from firstrate_data.domain.enums import (
     Adjustment,
     AssetType,
-    BarType,
     ContinuousFuturesAdjustment,
     ContractFiles,
     DelistedArchive,
@@ -9,28 +9,23 @@ from firstrate_data.domain import (
     EquitiesAdjustment,
     OtherData,
     Period,
-    TickerListing,
     Timeframe,
     TradingHours,
     Unadjusted,
 )
-from firstrate_data.download.client import Client
-from firstrate_data.store.store import Ingested, Store
+from firstrate_data.domain.ticker_listing import TickerListing
 
 __all__ = [
     "Adjustment",
     "AssetType",
     "BarType",
-    "Client",
     "ContinuousFuturesAdjustment",
     "ContractFiles",
     "DelistedArchive",
     "DelistedUpdate",
     "EquitiesAdjustment",
-    "Ingested",
     "OtherData",
     "Period",
-    "Store",
     "TickerListing",
     "Timeframe",
     "TradingHours",
