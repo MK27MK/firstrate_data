@@ -1,6 +1,6 @@
 [project]
 name = "firstrate-data"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Download FirstRate Data market data into a partitioned DuckDB-backed Parquet store."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -18,8 +18,10 @@ dependencies = [
 ]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=68", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
 
 [tool.pytest.ini_options]
 # src too, so the Examples blocks are executed rather than decorative
