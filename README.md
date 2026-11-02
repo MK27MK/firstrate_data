@@ -47,9 +47,7 @@ from firstrate_data import Client, EquitiesAdjustment, Period, Timeframe
 client = Client.from_env()
 
 # last trading day, 1-minute bars
-client.download_stocks_bars(
-    Period.DAY, Timeframe.MIN_1, EquitiesAdjustment.UNADJUSTED
-)
+client.download_stocks_bars(Period.DAY, Timeframe.MIN_1, EquitiesAdjustment.UNADJUSTED)
 
 # full archive -- takes a ticker_range letter (A-Z)
 client.download_stocks_bars(
